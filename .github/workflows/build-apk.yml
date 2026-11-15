@@ -80,6 +80,95 @@ jobs:
                   path.write_text(content)
           PY
 
+      - name: Configure Android release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          test -n "$KEYSTORE_BASE64"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+
+          def escape(value):
+              return (value.replace("\\", "\\\\")
+                           .replace("\n", "\\n")
+                           .replace("\r", "\\r")
+                           .replace(":", "\\:")
+                           .replace("=", "\\=")
+                           .replace(" ", "\\ "))
+
+          props = (
+              f"storePassword={escape(os.environ['KEYSTORE_PASSWORD'])}\n"
+              f"keyPassword={escape(os.environ['KEY_PASSWORD'])}\n"
+              f"keyAlias={escape(os.environ['KEY_ALIAS'])}\n"
+              "storeFile=upload-keystore.jks\n"
+          )
+          Path("android/key.properties").write_text(props)
+
+          gradle = Path("android/app/build.gradle.kts")
+          if not gradle.exists():
+              raise SystemExit("Expected build.gradle.kts was not found")
+
+          content = gradle.read_text()
+
+          if "val keystoreProperties =" not in content:
+              declarations = '''
+          val keystoreProperties = java.util.Properties()
+          val keystorePropertiesFile = rootProject.file("key.properties")
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
+          }
+
+          '''
+              content, count = re.subn(
+                  r"(?m)^android\s*\{",
+                  declarations + "android {",
+                  content,
+                  count=1
+              )
+              if count != 1:
+                  raise SystemExit("Could not find android block")
+
+          signing = '''
+              signingConfigs {
+                  create("release") {
+                      keyAlias = keystoreProperties["keyAlias"] as String
+                      keyPassword = keystoreProperties["keyPassword"] as String
+                      storeFile = file(keystoreProperties["storeFile"] as String)
+                      storePassword = keystoreProperties["storePassword"] as String
+                  }
+              }
+
+              buildTypes {
+                  getByName("release") {
+                      signingConfig = signingConfigs.getByName("release")
+                  }
+              }
+          '''
+
+          if 'create("release")' not in content:
+              content = re.sub(
+                  r"(?m)^android\s*\{",
+                  lambda m: m.group(0) + "\n" + signing,
+                  content,
+                  count=1
+              )
+
+          gradle.write_text(content)
+          PY
+
       - name: Install dependencies
         run: flutter pub get
 
