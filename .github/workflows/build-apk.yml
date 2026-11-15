@@ -28,10 +28,58 @@ jobs:
 
       - name: Generate Android project files
         run: flutter create --platforms=android .
-        
+
       - name: Add Firebase config
         run: cp google-services.json android/app/google-services.json
-        
+
+      - name: Configure Firebase Gradle plugin
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          settings = next((Path(p) for p in [
+              "android/settings.gradle.kts",
+              "android/settings.gradle"
+          ] if Path(p).exists()), None)
+
+          app = next((Path(p) for p in [
+              "android/app/build.gradle.kts",
+              "android/app/build.gradle"
+          ] if Path(p).exists()), None)
+
+          if settings is None or app is None:
+              raise SystemExit("Android Gradle files not found")
+
+          kts = settings.suffix == ".kts"
+
+          settings_line = (
+              '    id("com.google.gms.google-services") version "4.6.0" apply false'
+              if kts else
+              "    id 'com.google.gms.google-services' version '4.6.0' apply false"
+          )
+
+          app_line = (
+              '    id("com.google.gms.google-services")'
+              if app.suffix == ".kts" else
+              "    id 'com.google.gms.google-services'"
+          )
+
+          for path, line in [(settings, settings_line), (app, app_line)]:
+              content = path.read_text()
+              if "com.google.gms.google-services" not in content:
+                  content, count = re.subn(
+                      r"plugins\s*\{",
+                      lambda m: m.group(0) + "\n" + line,
+                      content,
+                      count=1
+                  )
+                  if count != 1:
+                      raise SystemExit(f"Could not find plugins block in {path}")
+                  path.write_text(content)
+          PY
+
       - name: Install dependencies
         run: flutter pub get
 
