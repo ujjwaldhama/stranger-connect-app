@@ -124,11 +124,16 @@ jobs:
 
           content = gradle.read_text()
 
+          imports = "import java.util.Properties\nimport java.io.FileInputStream\n\n"
+
+          if "import java.util.Properties" not in content:
+              content = imports + content
+
           declarations = """
-          val keystoreProperties = java.util.Properties()
+          val keystoreProperties = Properties()
           val keystorePropertiesFile = rootProject.file("key.properties")
           if (keystorePropertiesFile.exists()) {
-              keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
+              keystoreProperties.load(FileInputStream(keystorePropertiesFile))
           }
 
           """
