@@ -52,11 +52,9 @@ jobs:
           if settings is None or app is None:
               raise SystemExit("Android Gradle files not found")
 
-          kts = settings.suffix == ".kts"
-
           settings_line = (
               '    id("com.google.gms.google-services") version "4.6.0" apply false'
-              if kts else
+              if settings.suffix == ".kts" else
               "    id 'com.google.gms.google-services' version '4.6.0' apply false"
           )
 
@@ -80,7 +78,7 @@ jobs:
                   path.write_text(content)
           PY
 
-            - name: Configure Android release signing
+      - name: Configure Android release signing
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -95,10 +93,11 @@ jobs:
           test -n "$KEY_PASSWORD"
 
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          test -s android/app/upload-keystore.jks
 
           python3 - <<'PY'
-          import os
           from pathlib import Path
+          import os
           import re
 
           def escape(value):
@@ -115,23 +114,26 @@ jobs:
               f"keyAlias={escape(os.environ['KEY_ALIAS'])}\n"
               "storeFile=upload-keystore.jks\n"
           )
+
           Path("android/key.properties").write_text(props)
 
           gradle = Path("android/app/build.gradle.kts")
+
           if not gradle.exists():
               raise SystemExit("Expected build.gradle.kts was not found")
 
           content = gradle.read_text()
 
-          if "val keystoreProperties =" not in content:
-              declarations = '''
+          declarations = """
           val keystoreProperties = java.util.Properties()
           val keystorePropertiesFile = rootProject.file("key.properties")
           if (keystorePropertiesFile.exists()) {
               keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
           }
 
-          '''
+          """
+
+          if "val keystoreProperties =" not in content:
               content, count = re.subn(
                   r"(?m)^android\s*\{",
                   declarations + "android {",
@@ -141,7 +143,7 @@ jobs:
               if count != 1:
                   raise SystemExit("Could not find android block")
 
-          signing = '''
+          signing = """
               signingConfigs {
                   create("release") {
                       keyAlias = keystoreProperties["keyAlias"] as String
@@ -150,21 +152,26 @@ jobs:
                       storePassword = keystoreProperties["storePassword"] as String
                   }
               }
-
-              buildTypes {
-                  getByName("release") {
-                      signingConfig = signingConfigs.getByName("release")
-                  }
-              }
-          '''
+          """
 
           if 'create("release")' not in content:
-              content = re.sub(
+              content, count = re.subn(
                   r"(?m)^android\s*\{",
                   lambda m: m.group(0) + "\n" + signing,
                   content,
                   count=1
               )
+              if count != 1:
+                  raise SystemExit("Could not add release signing config")
+
+          content, count = re.subn(
+              r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)',
+              'signingConfig = signingConfigs.getByName("release")',
+              content
+          )
+
+          if count == 0:
+              raise SystemExit("Could not find default debug signing line")
 
           gradle.write_text(content)
           PY
@@ -172,7 +179,7 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Generate SHA-1 report
+      - name: Verify signing configuration
         run: |
           cd android
           chmod +x gradlew
