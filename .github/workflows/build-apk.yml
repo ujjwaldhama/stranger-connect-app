@@ -83,6 +83,12 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Generate SHA-1 report
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew signingReport
+
       - name: Build APK
         run: flutter build apk --release
 
