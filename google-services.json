@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "85058074560",
+    "project_id": "stranger-connect-b45ea",
+    "storage_bucket": "stranger-connect-b45ea.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:85058074560:android:d5f2f323fe788500a07a25",
+        "android_client_info": {
+          "package_name": "com.example.stranger_connect_premium"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB-U8-AI7_02e3k9WOp7rOyj6WcRzUjabM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
