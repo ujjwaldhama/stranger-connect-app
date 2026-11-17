@@ -84,6 +84,7 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -94,6 +95,14 @@ jobs:
 
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
           test -s android/app/upload-keystore.jks
+
+          echo "Checking PKCS12 keystore..."
+
+          keytool -list \
+            -keystore android/app/upload-keystore.jks \
+            -storetype PKCS12 \
+            -storepass:env KEYSTORE_PASSWORD \
+            -alias "$KEY_ALIAS"
 
           python3 - <<'PY'
           from pathlib import Path
@@ -155,6 +164,7 @@ jobs:
                       keyPassword = keystoreProperties["keyPassword"] as String
                       storeFile = file(keystoreProperties["storeFile"] as String)
                       storePassword = keystoreProperties["storePassword"] as String
+                      storeType = "PKCS12"
                   }
               }
           """
