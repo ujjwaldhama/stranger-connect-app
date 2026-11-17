@@ -39,46 +39,439 @@ class StrangerConnectApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const HomeScreen(),
+      home: const AuthGate(),
     );
   }
 }
 
 // --------------------------------------------------
-// USER PROFILE HELPER
+// AUTH GATE
 // --------------------------------------------------
 
-Future<void> saveNewUserProfile(User user) async {
-  final ref = FirebaseFirestore.instance
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(
+              child: CircularProgressIndicator(color: gold),
+            ),
+          );
+        }
+
+        if (snapshot.data == null) {
+          return const AuthScreen();
+        }
+
+        return const HomeScreen();
+      },
+    );
+  }
+}
+
+// --------------------------------------------------
+// SAVE USER PROFILE
+// --------------------------------------------------
+
+Future<void> saveUserProfile(
+  User user, {
+  String? name,
+}) async {
+  final reference = FirebaseFirestore.instance
       .collection('users')
       .doc(user.uid);
 
-  final snapshot = await ref.get();
+  final document = await reference.get();
 
-  final fallbackName = user.email
-          ?.split('@')
-          .first ??
-      'New Member';
-
-  final name = user.displayName?.trim().isNotEmpty == true
-      ? user.displayName!.trim()
-      : fallbackName;
-
-  if (!snapshot.exists) {
-    await ref.set({
-      'uid': user.uid,
-      'name': name,
+  if (!document.exists) {
+    await reference.set({
+      'name': name?.trim().isNotEmpty == true
+          ? name!.trim()
+          : (user.displayName ?? 'New Member'),
       'email': user.email ?? '',
       'bio': '',
-      'photoUrl': user.photoURL ?? '',
       'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
     });
   } else {
-    await ref.set({
-      'email': user.email ?? '',
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    final updates = <String, dynamic>{};
+
+    if (user.email != null) {
+      updates['email'] = user.email;
+    }
+
+    if (name != null && name.trim().isNotEmpty) {
+      updates['name'] = name.trim();
+    }
+
+    if (updates.isNotEmpty) {
+      await reference.set(updates, SetOptions(merge: true));
+    }
+  }
+}
+
+// --------------------------------------------------
+// SIGNUP AND LOGIN
+// --------------------------------------------------
+
+class AuthScreen extends StatefulWidget {
+  const AuthScreen({super.key});
+
+  @override
+  State<AuthScreen> createState() => _AuthScreenState();
+}
+
+class _AuthScreenState extends State<AuthScreen> {
+  final nameController = TextEditingController();
+  final emailController = TextEditingController();
+  final passwordController = TextEditingController();
+
+  bool isRegister = false;
+  bool loading = false;
+  bool obscurePassword = true;
+  String message = '';
+
+  Future<void> submit() async {
+    final name = nameController.text.trim();
+    final email = emailController.text.trim();
+    final password = passwordController.text;
+
+    if (isRegister && name.isEmpty) {
+      setState(() => message = 'Please enter your name.');
+      return;
+    }
+
+    if (email.isEmpty || !email.contains('@')) {
+      setState(() => message = 'Please enter a valid email address.');
+      return;
+    }
+
+    if (password.length < 6) {
+      setState(() => message = 'Password must be at least 6 characters.');
+      return;
+    }
+
+    setState(() {
+      loading = true;
+      message = '';
+    });
+
+    try {
+      UserCredential credential;
+
+      if (isRegister) {
+        credential = await FirebaseAuth.instance
+            .createUserWithEmailAndPassword(
+          email: email,
+          password: password,
+        );
+
+        await saveUserProfile(
+          credential.user!,
+          name: name,
+        );
+      } else {
+        credential = await FirebaseAuth.instance
+            .signInWithEmailAndPassword(
+          email: email,
+          password: password,
+        );
+
+        await saveUserProfile(credential.user!);
+      }
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        message = e.message ?? 'Authentication failed.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        message = 'Something went wrong. Please try again.';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => loading = false);
+      }
+    }
+  }
+
+  Future<void> googleLogin() async {
+    setState(() {
+      loading = true;
+      message = '';
+    });
+
+    try {
+      final googleUser = await GoogleSignIn().signIn();
+
+      if (googleUser == null) {
+        if (mounted) setState(() => loading = false);
+        return;
+      }
+
+      final googleAuth = await googleUser.authentication;
+
+      final credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+
+      final result = await FirebaseAuth.instance
+          .signInWithCredential(credential);
+
+      await saveUserProfile(result.user!);
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        message = e.message ?? 'Google sign-in failed.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        message = 'Google sign-in failed. Please try again.';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => loading = false);
+      }
+    }
+  }
+
+  Future<void> resetPassword() async {
+    final email = emailController.text.trim();
+
+    if (email.isEmpty || !email.contains('@')) {
+      setState(() => message = 'Enter your email address first.');
+      return;
+    }
+
+    try {
+      await FirebaseAuth.instance.sendPasswordResetEmail(
+        email: email,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        message = 'Password reset email sent.';
+      });
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        message = e.message ?? 'Could not send reset email.';
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    nameController.dispose();
+    emailController.dispose();
+    passwordController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            children: [
+              const Icon(
+                Icons.forum_rounded,
+                color: gold,
+                size: 65,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'STRANGER CONNECT',
+                style: TextStyle(
+                  color: gold,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.2,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Meet someone new. Stay anonymous.',
+                style: TextStyle(color: Colors.white54),
+              ),
+              const SizedBox(height: 35),
+              Text(
+                isRegister ? 'CREATE ACCOUNT' : 'WELCOME BACK',
+                style: const TextStyle(
+                  color: gold,
+                  fontSize: 23,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 25),
+
+              if (isRegister) ...[
+                TextField(
+                  controller: nameController,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(
+                    labelText: 'Full Name',
+                    prefixIcon: Icon(Icons.person_outline),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 15),
+              ],
+
+              TextField(
+                controller: emailController,
+                keyboardType: TextInputType.emailAddress,
+                decoration: const InputDecoration(
+                  labelText: 'Email Address',
+                  prefixIcon: Icon(Icons.email_outlined),
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 15),
+
+              TextField(
+                controller: passwordController,
+                obscureText: obscurePassword,
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  prefixIcon: const Icon(Icons.lock_outline),
+                  border: const OutlineInputBorder(),
+                  suffixIcon: IconButton(
+                    onPressed: () {
+                      setState(() {
+                        obscurePassword = !obscurePassword;
+                      });
+                    },
+                    icon: Icon(
+                      obscurePassword
+                          ? Icons.visibility
+                          : Icons.visibility_off,
+                    ),
+                  ),
+                ),
+              ),
+
+              if (!isRegister)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: loading ? null : resetPassword,
+                    child: const Text(
+                      'Forgot Password?',
+                      style: TextStyle(color: gold),
+                    ),
+                  ),
+                ),
+
+              const SizedBox(height: 12),
+
+              if (message.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Text(
+                    message,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: gold),
+                  ),
+                ),
+
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: gold,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.all(16),
+                  ),
+                  onPressed: loading ? null : submit,
+                  child: loading
+                      ? const SizedBox(
+                          height: 22,
+                          width: 22,
+                          child: CircularProgressIndicator(
+                            color: Colors.black,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : Text(
+                          isRegister ? 'SIGN UP' : 'LOGIN',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                ),
+              ),
+
+              const SizedBox(height: 15),
+
+              Row(
+                children: const [
+                  Expanded(child: Divider(color: Colors.white24)),
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 12),
+                    child: Text(
+                      'OR',
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                  ),
+                  Expanded(child: Divider(color: Colors.white24)),
+                ],
+              ),
+
+              const SizedBox(height: 15),
+
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: loading ? null : googleLogin,
+                  icon: const Icon(Icons.g_mobiledata, size: 28),
+                  label: const Text('Continue with Google'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: const BorderSide(color: Colors.white30),
+                    padding: const EdgeInsets.all(14),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 18),
+
+              TextButton(
+                onPressed: loading
+                    ? null
+                    : () {
+                        setState(() {
+                          isRegister = !isRegister;
+                          message = '';
+                        });
+                      },
+                child: Text(
+                  isRegister
+                      ? 'Already have an account? Login'
+                      : "Don't have an account? Sign Up",
+                  style: const TextStyle(color: gold),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -358,493 +751,123 @@ class ProfileScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges(),
-      builder: (context, authSnapshot) {
-        final user = authSnapshot.data;
+    final user = FirebaseAuth.instance.currentUser!;
 
-        if (authSnapshot.connectionState ==
-            ConnectionState.waiting) {
-          return const Center(
-            child: CircularProgressIndicator(color: gold),
-          );
-        }
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .snapshots(),
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data();
 
-        if (user == null) {
-          return _loggedOutProfile(context);
-        }
+        final name = data?['name']?.toString() ??
+            user.displayName ??
+            'New Member';
 
-        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-          stream: FirebaseFirestore.instance
-              .collection('users')
-              .doc(user.uid)
-              .snapshots(),
-          builder: (context, profileSnapshot) {
-            final data = profileSnapshot.data?.data();
+        final bio = data?['bio']?.toString() ?? '';
 
-            final name = data?['name']?.toString() ??
-                user.displayName ??
-                'New Member';
-
-            final bio = data?['bio']?.toString() ?? '';
-
-            final photoUrl = data?['photoUrl']?.toString().isNotEmpty == true
-                ? data!['photoUrl'].toString()
-                : (user.photoURL ?? '');
-
-            return _profileContent(
-              context,
-              user,
+        return ListView(
+          padding: const EdgeInsets.all(20),
+          children: [
+            const SizedBox(height: 15),
+            CircleAvatar(
+              radius: 48,
+              backgroundColor: const Color(0xFF302719),
+              child: const Icon(
+                Icons.person,
+                size: 48,
+                color: gold,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
               name,
-              bio,
-              photoUrl,
-            );
-          },
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 23,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              user.email ?? 'Google Account',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white54),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              bio.isEmpty ? 'Add a short bio about yourself.' : bio,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 25),
+
+            _ActionTile(
+              icon: Icons.edit,
+              title: 'Edit Profile',
+              subtitle: 'Change your name and bio',
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => EditProfileScreen(
+                      currentName: name,
+                      currentBio: bio,
+                    ),
+                  ),
+                );
+              },
+            ),
+
+            _ActionTile(
+              icon: Icons.share_rounded,
+              title: 'Owner Socials',
+              subtitle: 'Instagram, Telegram and YouTube',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const OwnerSocialsScreen(),
+                ),
+              ),
+            ),
+
+            _ActionTile(
+              icon: Icons.support_agent_rounded,
+              title: 'Customer Care',
+              subtitle: 'Contact official Telegram support',
+              onTap: () => _openExternal(
+                context,
+                'https://t.me/ujjwal_jaat01',
+              ),
+            ),
+
+            _ActionTile(
+              icon: Icons.admin_panel_settings_rounded,
+              title: 'Owner Admin Panel',
+              subtitle: 'Restricted owner controls',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const AdminAccessScreen(),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 15),
+
+            _ActionTile(
+              icon: Icons.logout,
+              title: 'Logout',
+              subtitle: 'Sign out of your account',
+              onTap: () async {
+                await FirebaseAuth.instance.signOut();
+                await GoogleSignIn().signOut();
+              },
+            ),
+          ],
         );
       },
-    );
-  }
-
-  Widget _loggedOutProfile(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
-        const SizedBox(height: 18),
-        const CircleAvatar(
-          radius: 42,
-          backgroundColor: Color(0xFF302719),
-          child: Icon(Icons.person, size: 42, color: gold),
-        ),
-        const SizedBox(height: 14),
-        const Text(
-          'New Member',
-          textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          'Sign in to create your Stranger Connect profile.',
-          textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.white54),
-        ),
-        const SizedBox(height: 20),
-        _ActionTile(
-          icon: Icons.login_rounded,
-          title: 'Login / Sign Up',
-          subtitle: 'Continue with email or Google',
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => const AuthScreen(),
-            ),
-          ),
-        ),
-        const SizedBox(height: 18),
-        _ownerOptions(context),
-      ],
-    );
-  }
-
-  Widget _profileContent(
-    BuildContext context,
-    User user,
-    String name,
-    String bio,
-    String photoUrl,
-  ) {
-    return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
-        const SizedBox(height: 12),
-        Center(
-          child: CircleAvatar(
-            radius: 48,
-            backgroundColor: const Color(0xFF302719),
-            backgroundImage: photoUrl.isNotEmpty
-                ? NetworkImage(photoUrl)
-                : null,
-            child: photoUrl.isEmpty
-                ? const Icon(Icons.person, size: 48, color: gold)
-                : null,
-          ),
-        ),
-        const SizedBox(height: 14),
-        Text(
-          name,
-          textAlign: TextAlign.center,
-          style: const TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        if (bio.isNotEmpty) ...[
-          const SizedBox(height: 7),
-          Text(
-            bio,
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.white60),
-          ),
-        ],
-        const SizedBox(height: 5),
-        Text(
-          user.email ?? '',
-          textAlign: TextAlign.center,
-          style: const TextStyle(
-            color: Colors.white38,
-            fontSize: 12,
-          ),
-        ),
-        const SizedBox(height: 22),
-        _ActionTile(
-          icon: Icons.edit_rounded,
-          title: 'Edit Profile',
-          subtitle: 'Change your name and bio',
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => EditProfileScreen(user: user),
-            ),
-          ),
-        ),
-        _ActionTile(
-          icon: Icons.logout_rounded,
-          title: 'Logout',
-          subtitle: 'Sign out of your account',
-          onTap: () async {
-            try {
-              await FirebaseAuth.instance.signOut();
-              await GoogleSignIn().signOut();
-            } catch (_) {
-              await FirebaseAuth.instance.signOut();
-            }
-          },
-        ),
-        const SizedBox(height: 12),
-        _ownerOptions(context),
-      ],
-    );
-  }
-
-  Widget _ownerOptions(BuildContext context) {
-    return Column(
-      children: [
-        _ActionTile(
-          icon: Icons.share_rounded,
-          title: 'Owner Socials',
-          subtitle: 'Instagram, Telegram and YouTube',
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => const OwnerSocialsScreen(),
-            ),
-          ),
-        ),
-        _ActionTile(
-          icon: Icons.support_agent_rounded,
-          title: 'Customer Care',
-          subtitle: 'Contact official Telegram support',
-          onTap: () => _openExternal(
-            context,
-            'https://t.me/ujjwal_jaat01',
-          ),
-        ),
-        _ActionTile(
-          icon: Icons.admin_panel_settings_rounded,
-          title: 'Owner Admin Panel',
-          subtitle: 'Restricted owner controls',
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => const AdminAccessScreen(),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-// --------------------------------------------------
-// LOGIN AND SIGNUP
-// --------------------------------------------------
-
-class AuthScreen extends StatefulWidget {
-  const AuthScreen({super.key});
-
-  @override
-  State<AuthScreen> createState() => _AuthScreenState();
-}
-
-class _AuthScreenState extends State<AuthScreen> {
-  final emailController = TextEditingController();
-  final passwordController = TextEditingController();
-
-  bool isRegister = false;
-  bool loading = false;
-  bool obscurePassword = true;
-  String message = '';
-
-  Future<void> submit() async {
-    final email = emailController.text.trim();
-    final password = passwordController.text;
-
-    if (email.isEmpty || !email.contains('@')) {
-      setState(() => message = 'Enter a valid email address.');
-      return;
-    }
-
-    if (password.length < 6) {
-      setState(() => message = 'Password must be at least 6 characters.');
-      return;
-    }
-
-    setState(() {
-      loading = true;
-      message = '';
-    });
-
-    try {
-      UserCredential credential;
-
-      if (isRegister) {
-        credential = await FirebaseAuth.instance
-            .createUserWithEmailAndPassword(
-          email: email,
-          password: password,
-        );
-      } else {
-        credential = await FirebaseAuth.instance
-            .signInWithEmailAndPassword(
-          email: email,
-          password: password,
-        );
-      }
-
-      final user = credential.user;
-
-      if (user != null) {
-        await saveNewUserProfile(user);
-      }
-
-      if (!mounted) return;
-
-      Navigator.pop(context);
-    } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-
-      setState(() {
-        message = e.message ?? 'Authentication failed.';
-      });
-    } catch (e) {
-      if (!mounted) return;
-
-      setState(() {
-        message = 'Something went wrong. Please try again.';
-      });
-    } finally {
-      if (mounted) {
-        setState(() => loading = false);
-      }
-    }
-  }
-
-  Future<void> signInWithGoogle() async {
-    setState(() {
-      loading = true;
-      message = '';
-    });
-
-    try {
-      final googleUser = await GoogleSignIn().signIn();
-
-      if (googleUser == null) {
-        if (mounted) setState(() => loading = false);
-        return;
-      }
-
-      final googleAuth = await googleUser.authentication;
-
-      final credential = GoogleAuthProvider.credential(
-        accessToken: googleAuth.accessToken,
-        idToken: googleAuth.idToken,
-      );
-
-      final result = await FirebaseAuth.instance
-          .signInWithCredential(credential);
-
-      if (result.user != null) {
-        await saveNewUserProfile(result.user!);
-      }
-
-      if (!mounted) return;
-
-      Navigator.pop(context);
-    } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-
-      setState(() {
-        message = e.message ?? 'Google sign-in failed.';
-      });
-    } catch (e) {
-      if (!mounted) return;
-
-      setState(() {
-        message = 'Google sign-in failed. Check your Firebase setup.';
-      });
-    } finally {
-      if (mounted) {
-        setState(() => loading = false);
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    emailController.dispose();
-    passwordController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('ACCOUNT')),
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            children: [
-              const Icon(
-                Icons.forum_rounded,
-                color: gold,
-                size: 65,
-              ),
-              const SizedBox(height: 16),
-              Text(
-                isRegister ? 'CREATE ACCOUNT' : 'WELCOME BACK',
-                style: const TextStyle(
-                  color: gold,
-                  fontWeight: FontWeight.w900,
-                  fontSize: 23,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                isRegister
-                    ? 'Join Stranger Connect'
-                    : 'Login to your account',
-                style: const TextStyle(color: Colors.white60),
-              ),
-              const SizedBox(height: 28),
-              TextField(
-                controller: emailController,
-                keyboardType: TextInputType.emailAddress,
-                decoration: const InputDecoration(
-                  labelText: 'Email address',
-                  prefixIcon: Icon(Icons.email_outlined),
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 15),
-              TextField(
-                controller: passwordController,
-                obscureText: obscurePassword,
-                decoration: InputDecoration(
-                  labelText: 'Password',
-                  prefixIcon: const Icon(Icons.lock_outline),
-                  border: const OutlineInputBorder(),
-                  suffixIcon: IconButton(
-                    onPressed: () {
-                      setState(() {
-                        obscurePassword = !obscurePassword;
-                      });
-                    },
-                    icon: Icon(
-                      obscurePassword
-                          ? Icons.visibility_outlined
-                          : Icons.visibility_off_outlined,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 14),
-              if (message.isNotEmpty)
-                Text(
-                  message,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.orangeAccent),
-                ),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: gold,
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.all(15),
-                  ),
-                  onPressed: loading ? null : submit,
-                  child: loading
-                      ? const CircularProgressIndicator(
-                          color: Colors.black,
-                        )
-                      : Text(
-                          isRegister ? 'CREATE ACCOUNT' : 'LOGIN',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              const Row(
-                children: [
-                  Expanded(child: Divider(color: Colors.white24)),
-                  Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 12),
-                    child: Text(
-                      'OR',
-                      style: TextStyle(color: Colors.white54),
-                    ),
-                  ),
-                  Expanded(child: Divider(color: Colors.white24)),
-                ],
-              ),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.white,
-                    side: const BorderSide(color: gold),
-                    padding: const EdgeInsets.all(14),
-                  ),
-                  onPressed: loading ? null : signInWithGoogle,
-                  icon: const Icon(Icons.g_mobiledata, size: 30),
-                  label: const Text('Continue with Google'),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextButton(
-                onPressed: loading
-                    ? null
-                    : () {
-                        setState(() {
-                          isRegister = !isRegister;
-                          message = '';
-                        });
-                      },
-                child: Text(
-                  isRegister
-                      ? 'Already have an account? Login'
-                      : 'New here? Create an account',
-                  style: const TextStyle(color: gold),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }
@@ -854,63 +877,31 @@ class _AuthScreenState extends State<AuthScreen> {
 // --------------------------------------------------
 
 class EditProfileScreen extends StatefulWidget {
-  final User user;
+  final String currentName;
+  final String currentBio;
 
   const EditProfileScreen({
     super.key,
-    required this.user,
+    required this.currentName,
+    required this.currentBio,
   });
 
   @override
-  State<EditProfileScreen> createState() =>
-      _EditProfileScreenState();
+  State<EditProfileScreen> createState() => _EditProfileScreenState();
 }
 
 class _EditProfileScreenState extends State<EditProfileScreen> {
   late final TextEditingController nameController;
   late final TextEditingController bioController;
 
-  bool loadingProfile = true;
-  bool saving = false;
+  bool loading = false;
   String message = '';
 
   @override
   void initState() {
     super.initState();
-
-    nameController = TextEditingController(
-      text: widget.user.displayName ?? '',
-    );
-
-    bioController = TextEditingController();
-
-    loadProfile();
-  }
-
-  Future<void> loadProfile() async {
-    try {
-      final document = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(widget.user.uid)
-          .get();
-
-      final data = document.data();
-
-      if (data != null) {
-        nameController.text =
-            data['name']?.toString() ??
-            widget.user.displayName ??
-            '';
-
-        bioController.text = data['bio']?.toString() ?? '';
-      }
-    } catch (_) {
-      message = 'Could not load profile details.';
-    }
-
-    if (mounted) {
-      setState(() => loadingProfile = false);
-    }
+    nameController = TextEditingController(text: widget.currentName);
+    bioController = TextEditingController(text: widget.currentBio);
   }
 
   Future<void> saveProfile() async {
@@ -922,32 +913,26 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       return;
     }
 
-    if (name.length > 40) {
-      setState(() => message = 'Name must be under 40 characters.');
-      return;
-    }
-
-    if (bio.length > 160) {
-      setState(() => message = 'Bio must be under 160 characters.');
+    if (name.length > 40 || bio.length > 160) {
+      setState(() => message = 'Name or bio is too long.');
       return;
     }
 
     setState(() {
-      saving = true;
+      loading = true;
       message = '';
     });
 
     try {
+      final user = FirebaseAuth.instance.currentUser!;
+
       await FirebaseFirestore.instance
           .collection('users')
-          .doc(widget.user.uid)
+          .doc(user.uid)
           .set({
         'name': name,
         'bio': bio,
-        'updatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
-
-      await widget.user.updateDisplayName(name);
 
       if (!mounted) return;
 
@@ -960,11 +945,11 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       if (!mounted) return;
 
       setState(() {
-        message = 'Could not save profile. Check internet and try again.';
+        message = 'Could not update profile. Please try again.';
       });
     } finally {
       if (mounted) {
-        setState(() => saving = false);
+        setState(() => loading = false);
       }
     }
   }
@@ -980,89 +965,56 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('EDIT PROFILE')),
-      body: loadingProfile
-          ? const Center(
-              child: CircularProgressIndicator(color: gold),
-            )
-          : ListView(
-              padding: const EdgeInsets.all(20),
-              children: [
-                const Center(
-                  child: CircleAvatar(
-                    radius: 42,
-                    backgroundColor: Color(0xFF302719),
-                    child: Icon(
-                      Icons.person,
-                      color: gold,
-                      size: 42,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  'EDIT YOUR DETAILS',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: gold,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 25),
-                TextField(
-                  controller: nameController,
-                  maxLength: 40,
-                  decoration: const InputDecoration(
-                    labelText: 'Display name',
-                    prefixIcon: Icon(Icons.person_outline),
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: bioController,
-                  maxLength: 160,
-                  maxLines: 4,
-                  decoration: const InputDecoration(
-                    labelText: 'About you',
-                    hintText: 'Write something about yourself...',
-                    prefixIcon: Icon(Icons.info_outline),
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Email: ${widget.user.email ?? ''}',
-                  style: const TextStyle(color: Colors.white54),
-                ),
-                const SizedBox(height: 14),
-                if (message.isNotEmpty)
-                  Text(
-                    message,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.orangeAccent),
-                  ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: gold,
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.all(15),
-                    ),
-                    onPressed: saving ? null : saveProfile,
-                    child: saving
-                        ? const CircularProgressIndicator(
-                            color: Colors.black,
-                          )
-                        : const Text(
-                            'SAVE PROFILE',
-                            style: TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                  ),
-                ),
-              ],
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          const CircleAvatar(
+            radius: 42,
+            backgroundColor: Color(0xFF302719),
+            child: Icon(Icons.person, color: gold, size: 42),
+          ),
+          const SizedBox(height: 25),
+          TextField(
+            controller: nameController,
+            maxLength: 40,
+            decoration: const InputDecoration(
+              labelText: 'Your Name',
+              prefixIcon: Icon(Icons.person_outline),
+              border: OutlineInputBorder(),
             ),
+          ),
+          const SizedBox(height: 15),
+          TextField(
+            controller: bioController,
+            maxLength: 160,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'Your Bio',
+              hintText: 'Write something about yourself...',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          if (message.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(
+                message,
+                style: const TextStyle(color: gold),
+              ),
+            ),
+          ElevatedButton(
+            onPressed: loading ? null : saveProfile,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: gold,
+              foregroundColor: Colors.black,
+              padding: const EdgeInsets.all(15),
+            ),
+            child: loading
+                ? const CircularProgressIndicator(color: Colors.black)
+                : const Text('SAVE PROFILE'),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1168,8 +1120,7 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
 
     if (email.isEmpty || password.length < 6) {
       setState(() {
-        message =
-            'Enter a valid Gmail and password (minimum 6 characters).';
+        message = 'Enter a valid email and password (minimum 6 characters).';
       });
       return;
     }
@@ -1259,9 +1210,7 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
                 ),
                 const SizedBox(height: 18),
                 Text(
-                  isRegister
-                      ? 'CREATE OWNER ACCOUNT'
-                      : 'OWNER LOGIN',
+                  isRegister ? 'CREATE OWNER ACCOUNT' : 'OWNER LOGIN',
                   style: const TextStyle(
                     color: gold,
                     fontWeight: FontWeight.w900,
@@ -1273,7 +1222,7 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
                   controller: emailController,
                   keyboardType: TextInputType.emailAddress,
                   decoration: const InputDecoration(
-                    labelText: 'Admin Gmail',
+                    labelText: 'Admin Email',
                     prefixIcon: Icon(Icons.email_outlined),
                     border: OutlineInputBorder(),
                   ),
@@ -1309,11 +1258,7 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
                         ? const CircularProgressIndicator(
                             color: Colors.black,
                           )
-                        : Text(
-                            isRegister
-                                ? 'CREATE ACCOUNT'
-                                : 'LOGIN',
-                          ),
+                        : Text(isRegister ? 'CREATE ACCOUNT' : 'LOGIN'),
                   ),
                 ),
                 TextButton(
@@ -1459,9 +1404,7 @@ class UserManagementScreen extends StatelessWidget {
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Action failed: $e'),
-          ),
+          const SnackBar(content: Text('Action failed.')),
         );
       }
     }
@@ -1470,9 +1413,7 @@ class UserManagementScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('USER MANAGEMENT'),
-      ),
+      appBar: AppBar(title: const Text('USER MANAGEMENT')),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: FirebaseFirestore.instance
             .collection('users')
@@ -1483,7 +1424,7 @@ class UserManagementScreen extends StatelessWidget {
               icon: Icons.error_outline,
               title: 'Could not load users',
               subtitle:
-                  'Check your Firestore security rules and internet connection.',
+                  'Check Firestore security rules and internet connection.',
             );
           }
 
@@ -1499,8 +1440,7 @@ class UserManagementScreen extends StatelessWidget {
             return const _EmptyState(
               icon: Icons.people_outline,
               title: 'No users yet',
-              subtitle:
-                  'Registered app users will appear here when their profiles are saved in Firestore.',
+              subtitle: 'Registered app users will appear here.',
             );
           }
 
@@ -1521,9 +1461,7 @@ class UserManagementScreen extends StatelessWidget {
                 margin: const EdgeInsets.only(bottom: 14),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(16),
-                  side: BorderSide(
-                    color: gold.withOpacity(.18),
-                  ),
+                  side: BorderSide(color: gold.withOpacity(.18)),
                 ),
                 child: Padding(
                   padding: const EdgeInsets.all(14),
@@ -1653,10 +1591,7 @@ class _ActionTile extends StatelessWidget {
               fontSize: 12,
             ),
           ),
-          trailing: const Icon(
-            Icons.chevron_right,
-            color: gold,
-          ),
+          trailing: const Icon(Icons.chevron_right, color: gold),
         ),
       );
 }
@@ -1685,9 +1620,7 @@ class _StatCard extends StatelessWidget {
         decoration: BoxDecoration(
           color: panel,
           borderRadius: BorderRadius.circular(15),
-          border: Border.all(
-            color: gold.withOpacity(.18),
-          ),
+          border: Border.all(color: gold.withOpacity(.18)),
         ),
         child: Column(
           children: [
@@ -1726,11 +1659,7 @@ class _Feature extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 9),
         child: Row(
           children: [
-            const Icon(
-              Icons.check_circle,
-              color: gold,
-              size: 19,
-            ),
+            const Icon(Icons.check_circle, color: gold, size: 19),
             const SizedBox(width: 10),
             Expanded(child: Text(text)),
           ],
