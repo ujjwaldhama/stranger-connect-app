@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "85058074560",
+    "project_id": "stranger-connect-b45ea",
+    "storage_bucket": "stranger-connect-b45ea.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:85058074560:android:d5f2f323fe788500a07a25",
+        "android_client_info": {
+          "package_name": "com.example.stranger_connect_premium"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "85058074560-23dj3v9enrahrqisr3u00e86i1v46otv.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.stranger_connect_premium",
+            "certificate_hash": "2b53e6a2738b4489fcf9427d8b3ebbf349cf8c61"
+          }
+        },
+        {
+          "client_id": "85058074560-1ph0eepu7oo19urvbidrkvqmj3u9g3vt.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB-U8-AI7_02e3k9WOp7rOyj6WcRzUjabM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "85058074560-1ph0eepu7oo19urvbidrkvqmj3u9g3vt.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
