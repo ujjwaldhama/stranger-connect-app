@@ -11,6 +11,11 @@ const bg = Color(0xFF090909);
 const panel = Color(0xFF171717);
 
 final db = FirebaseFirestore.instance;
+final auth = FirebaseAuth.instance;
+
+// --------------------------------------------------
+// APP
+// --------------------------------------------------
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -47,36 +52,26 @@ class StrangerConnectApp extends StatelessWidget {
 }
 
 // --------------------------------------------------
-// PREMIUM STATUS
+// PREMIUM
 // --------------------------------------------------
 
 bool isPremiumActive(Map<String, dynamic>? data) {
   if (data == null || data['isPremium'] != true) return false;
-
   final expiry = data['premiumExpiresAt'];
 
-  // Older admin-enabled Premium accounts without an expiry
-  // remain active until the admin sets or removes Premium.
   if (expiry == null) return true;
 
-  DateTime? expiryDate;
+  DateTime? date;
+  if (expiry is Timestamp) date = expiry.toDate();
+  if (expiry is DateTime) date = expiry;
 
-  if (expiry is Timestamp) {
-    expiryDate = expiry.toDate();
-  } else if (expiry is DateTime) {
-    expiryDate = expiry;
-  }
-
-  if (expiryDate == null) return false;
-
-  return DateTime.now().isBefore(expiryDate);
+  return date != null && DateTime.now().isBefore(date);
 }
 
 String premiumRemaining(Map<String, dynamic>? data) {
   final expiry = data?['premiumExpiresAt'];
 
   if (expiry == null) return 'Active';
-
   if (expiry is! Timestamp) return 'Inactive';
 
   final difference = expiry.toDate().difference(DateTime.now());
@@ -89,48 +84,27 @@ String premiumRemaining(Map<String, dynamic>? data) {
     return '${difference.inDays} day(s) remaining';
   }
 
-  final hours = difference.inHours;
-  if (hours >= 1) return '$hours hour(s) remaining';
+  if (difference.inHours >= 1) {
+    return '${difference.inHours} hour(s) remaining';
+  }
 
   return '${difference.inMinutes} minute(s) remaining';
 }
 
-// --------------------------------------------------
-// AUTH GATE
-// --------------------------------------------------
-
-class AuthGate extends StatelessWidget {
-  const AuthGate({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator(color: gold)),
-          );
-        }
-
-        if (snapshot.data == null) return const AuthScreen();
-
-        return const HomeScreen();
-      },
-    );
-  }
+bool genderMatches(String preference, String gender) {
+  return preference == 'Both' || preference == gender;
 }
 
 // --------------------------------------------------
-// SAVE USER PROFILE
+// USER PROFILE
 // --------------------------------------------------
 
 Future<void> saveUserProfile(User user, {String? name}) async {
-  final reference = db.collection('users').doc(user.uid);
-  final document = await reference.get();
+  final ref = db.collection('users').doc(user.uid);
+  final document = await ref.get();
 
   if (!document.exists) {
-    await reference.set({
+    await ref.set({
       'name': name?.trim().isNotEmpty == true
           ? name!.trim()
           : (user.displayName ?? 'New Member'),
@@ -148,13 +122,38 @@ Future<void> saveUserProfile(User user, {String? name}) async {
     }
 
     if (updates.isNotEmpty) {
-      await reference.set(updates, SetOptions(merge: true));
+      await ref.set(updates, SetOptions(merge: true));
     }
   }
 }
 
 // --------------------------------------------------
-// SIGNUP AND LOGIN
+// AUTH GATE
+// --------------------------------------------------
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: auth.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator(color: gold)),
+          );
+        }
+
+        if (snapshot.data == null) return const AuthScreen();
+        return const HomeScreen();
+      },
+    );
+  }
+}
+
+// --------------------------------------------------
+// LOGIN / SIGNUP
 // --------------------------------------------------
 
 class AuthScreen extends StatefulWidget {
@@ -200,31 +199,25 @@ class _AuthScreenState extends State<AuthScreen> {
     });
 
     try {
-      UserCredential credential;
+      UserCredential result;
 
       if (isRegister) {
-        credential = await FirebaseAuth.instance
-            .createUserWithEmailAndPassword(
+        result = await auth.createUserWithEmailAndPassword(
           email: email,
           password: password,
         );
-
-        await saveUserProfile(credential.user!, name: name);
+        await saveUserProfile(result.user!, name: name);
       } else {
-        credential = await FirebaseAuth.instance
-            .signInWithEmailAndPassword(
+        result = await auth.signInWithEmailAndPassword(
           email: email,
           password: password,
         );
-
-        await saveUserProfile(credential.user!);
+        await saveUserProfile(result.user!);
       }
     } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-      setState(() => message = e.message ?? 'Authentication failed.');
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => message = 'Something went wrong. Please try again.');
+      if (mounted) setState(() => message = e.message ?? 'Login failed.');
+    } catch (_) {
+      if (mounted) setState(() => message = 'Something went wrong.');
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -251,16 +244,12 @@ class _AuthScreenState extends State<AuthScreen> {
         idToken: googleAuth.idToken,
       );
 
-      final result = await FirebaseAuth.instance
-          .signInWithCredential(credential);
-
+      final result = await auth.signInWithCredential(credential);
       await saveUserProfile(result.user!);
     } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-      setState(() => message = e.message ?? 'Google sign-in failed.');
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => message = 'Google sign-in failed. Please try again.');
+      if (mounted) setState(() => message = e.message ?? 'Google login failed.');
+    } catch (_) {
+      if (mounted) setState(() => message = 'Google login failed.');
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -275,13 +264,10 @@ class _AuthScreenState extends State<AuthScreen> {
     }
 
     try {
-      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
-
-      if (!mounted) return;
-      setState(() => message = 'Password reset email sent.');
+      await auth.sendPasswordResetEmail(email: email);
+      if (mounted) setState(() => message = 'Password reset email sent.');
     } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-      setState(() => message = e.message ?? 'Could not send reset email.');
+      if (mounted) setState(() => message = e.message ?? 'Could not send email.');
     }
   }
 
@@ -330,7 +316,6 @@ class _AuthScreenState extends State<AuthScreen> {
               if (isRegister) ...[
                 TextField(
                   controller: nameController,
-                  textCapitalization: TextCapitalization.words,
                   decoration: const InputDecoration(
                     labelText: 'Full Name',
                     prefixIcon: Icon(Icons.person_outline),
@@ -397,18 +382,8 @@ class _AuthScreenState extends State<AuthScreen> {
                   ),
                   onPressed: loading ? null : submit,
                   child: loading
-                      ? const SizedBox(
-                          height: 22,
-                          width: 22,
-                          child: CircularProgressIndicator(
-                            color: Colors.black,
-                            strokeWidth: 2,
-                          ),
-                        )
-                      : Text(
-                          isRegister ? 'SIGN UP' : 'LOGIN',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
+                      ? const CircularProgressIndicator(color: Colors.black)
+                      : Text(isRegister ? 'SIGN UP' : 'LOGIN'),
                 ),
               ),
               const SizedBox(height: 15),
@@ -440,12 +415,10 @@ class _AuthScreenState extends State<AuthScreen> {
               TextButton(
                 onPressed: loading
                     ? null
-                    : () {
-                        setState(() {
+                    : () => setState(() {
                           isRegister = !isRegister;
                           message = '';
-                        });
-                      },
+                        }),
                 child: Text(
                   isRegister
                       ? 'Already have an account? Login'
@@ -502,7 +475,20 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         actions: [
           IconButton(
-            onPressed: () => _showInfo(context),
+            onPressed: () => showDialog(
+              context: context,
+              builder: (_) => AlertDialog(
+                backgroundColor: panel,
+                title: const Text('Notifications'),
+                content: const Text('You are all caught up.'),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('OK'),
+                  ),
+                ],
+              ),
+            ),
             icon: const Icon(Icons.notifications_none_rounded),
           ),
         ],
@@ -538,23 +524,6 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
-
-  void _showInfo(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: panel,
-        title: const Text('Notifications'),
-        content: const Text('You are all caught up.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 // --------------------------------------------------
@@ -563,6 +532,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
 class DiscoverScreen extends StatelessWidget {
   const DiscoverScreen({super.key});
+
+  Future<void> _find(BuildContext context) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const FindStrangerScreen()),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -616,13 +592,17 @@ class DiscoverScreen extends StatelessWidget {
           icon: Icons.shuffle_rounded,
           title: 'Find Stranger',
           subtitle: 'Get matched for a private chat',
-          onTap: () => _comingSoon(context),
+          onTap: () => _find(context),
         ),
         _ActionTile(
           icon: Icons.person_add_alt_1_rounded,
           title: 'Chat with Friends',
           subtitle: 'Connect using a private invite',
-          onTap: () => _comingSoon(context),
+          onTap: () => ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Friends invite feature is coming next.'),
+            ),
+          ),
         ),
         const SizedBox(height: 20),
         const Text(
@@ -660,11 +640,813 @@ class DiscoverScreen extends StatelessWidget {
       ],
     );
   }
+}
 
-  void _comingSoon(BuildContext context) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Chat backend is the next development step.'),
+// --------------------------------------------------
+// STRANGER MATCHING
+// --------------------------------------------------
+
+class FindStrangerScreen extends StatefulWidget {
+  const FindStrangerScreen({super.key});
+
+  @override
+  State<FindStrangerScreen> createState() => _FindStrangerScreenState();
+}
+
+class _FindStrangerScreenState extends State<FindStrangerScreen> {
+  final user = auth.currentUser!;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? ownSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? queueSubscription;
+
+  bool searching = true;
+  bool openingChat = false;
+  bool working = false;
+  bool closed = false;
+  String status = 'Finding someone for you...';
+  String? errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _startSearch();
+  }
+
+  Future<void> _startSearch() async {
+    if (closed || !mounted) return;
+
+    setState(() {
+      searching = true;
+      openingChat = false;
+      errorMessage = null;
+      status = 'Finding someone for you...';
+    });
+
+    try {
+      final profileDoc = await db.collection('users').doc(user.uid).get();
+      final profile = profileDoc.data();
+
+      if (profile == null) {
+        throw Exception('Please complete your profile first.');
+      }
+
+      if (profile['isBanned'] == true) {
+        throw Exception('Your account is restricted.');
+      }
+
+      final gender = profile['gender']?.toString() ?? '';
+
+      if (gender != 'Male' && gender != 'Female') {
+        throw Exception('Please select your gender in Edit Profile first.');
+      }
+
+      final premium = isPremiumActive(profile);
+      final preference = premium
+          ? (profile['preferredGender']?.toString() ?? 'Both')
+          : 'Both';
+
+      final blockedSnapshot = await db
+          .collection('users')
+          .doc(user.uid)
+          .collection('blocked')
+          .get();
+
+      final blocked = blockedSnapshot.docs.map((d) => d.id).toList();
+
+      final queueRef = db.collection('matchQueue').doc(user.uid);
+
+      await queueRef.set({
+        'uid': user.uid,
+        'gender': gender,
+        'preferredGender': preference,
+        'blockedUids': blocked,
+        'status': 'waiting',
+        'chatId': null,
+        'partnerUid': null,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted || closed) return;
+
+      ownSubscription?.cancel();
+      queueSubscription?.cancel();
+
+      ownSubscription = queueRef.snapshots().listen((snapshot) {
+        final data = snapshot.data();
+
+        if (data == null || !mounted || closed) return;
+
+        if (data['status'] == 'matched') {
+          final chatId = data['chatId']?.toString();
+          final partnerUid = data['partnerUid']?.toString();
+
+          if (chatId != null && partnerUid != null) {
+            _openChat(chatId, partnerUid);
+          }
+        }
+      });
+
+      queueSubscription = db
+          .collection('matchQueue')
+          .where('status', isEqualTo: 'waiting')
+          .snapshots()
+          .listen((snapshot) {
+        _tryMatch(snapshot.docs);
+      });
+
+      setState(() => status = 'Searching for an available stranger...');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        searching = false;
+        errorMessage = e.toString().replaceFirst('Exception: ', '');
+        status = 'Unable to start matching.';
+      });
+    }
+  }
+
+  Future<void> _tryMatch(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> candidates,
+  ) async {
+    if (working || openingChat || closed || !mounted) return;
+
+    working = true;
+
+    try {
+      final myQueueRef = db.collection('matchQueue').doc(user.uid);
+      final mySnapshot = await myQueueRef.get();
+      final myData = mySnapshot.data();
+
+      if (myData == null || myData['status'] != 'waiting') return;
+
+      final myGender = myData['gender']?.toString() ?? '';
+      final myPreference =
+          myData['preferredGender']?.toString() ?? 'Both';
+      final myBlocked = List<String>.from(
+        myData['blockedUids'] ?? const [],
+      );
+
+      for (final candidate in candidates) {
+        if (!mounted || closed || openingChat) return;
+
+        final partnerUid = candidate.id;
+
+        if (partnerUid == user.uid || myBlocked.contains(partnerUid)) {
+          continue;
+        }
+
+        final candidateData = candidate.data();
+        final partnerGender =
+            candidateData['gender']?.toString() ?? '';
+        final partnerPreference =
+            candidateData['preferredGender']?.toString() ?? 'Both';
+        final partnerBlocked = List<String>.from(
+          candidateData['blockedUids'] ?? const [],
+        );
+
+        if (partnerBlocked.contains(user.uid)) continue;
+
+        if (!genderMatches(myPreference, partnerGender)) continue;
+        if (!genderMatches(partnerPreference, myGender)) continue;
+
+        final partnerRef = db.collection('matchQueue').doc(partnerUid);
+        final chatRef = db.collection('chats').doc();
+
+        final matched = await db.runTransaction<bool>((transaction) async {
+          final myCurrent = await transaction.get(myQueueRef);
+          final partnerCurrent = await transaction.get(partnerRef);
+
+          if (!myCurrent.exists || !partnerCurrent.exists) return false;
+
+          final myCurrentData = myCurrent.data()!;
+          final partnerCurrentData = partnerCurrent.data()!;
+
+          if (myCurrentData['status'] != 'waiting' ||
+              partnerCurrentData['status'] != 'waiting') {
+            return false;
+          }
+
+          if (partnerCurrentData['uid'] != partnerUid) return false;
+
+          transaction.set(chatRef, {
+            'participants': [user.uid, partnerUid],
+            'active': true,
+            'createdAt': FieldValue.serverTimestamp(),
+            'lastMessage': '',
+            'lastMessageAt': FieldValue.serverTimestamp(),
+          });
+
+          transaction.update(myQueueRef, {
+            'status': 'matched',
+            'chatId': chatRef.id,
+            'partnerUid': partnerUid,
+          });
+
+          transaction.update(partnerRef, {
+            'status': 'matched',
+            'chatId': chatRef.id,
+            'partnerUid': user.uid,
+          });
+
+          return true;
+        });
+
+        if (matched) return;
+      }
+    } catch (e) {
+      debugPrint('Matching error: $e');
+    } finally {
+      working = false;
+    }
+  }
+
+  Future<void> _openChat(String chatId, String partnerUid) async {
+    if (openingChat || closed || !mounted) return;
+
+    openingChat = true;
+    searching = false;
+
+    await queueSubscription?.cancel();
+    await ownSubscription?.cancel();
+
+    if (!mounted || closed) return;
+
+    final next = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ChatScreen(
+          chatId: chatId,
+          partnerUid: partnerUid,
+        ),
+      ),
+    );
+
+    if (!mounted || closed) return;
+
+    openingChat = false;
+
+    if (next == true) {
+      await _startSearch();
+    } else {
+      await _leaveSearch();
+      if (mounted) Navigator.pop(context);
+    }
+  }
+
+  Future<void> _leaveSearch() async {
+    closed = true;
+
+    await queueSubscription?.cancel();
+    await ownSubscription?.cancel();
+
+    try {
+      await db.collection('matchQueue').doc(user.uid).delete();
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    closed = true;
+    queueSubscription?.cancel();
+    ownSubscription?.cancel();
+
+    db.collection('matchQueue').doc(user.uid).delete().catchError((_) {});
+
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('FIND STRANGER'),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () async {
+            await _leaveSearch();
+            if (mounted) Navigator.pop(context);
+          },
+        ),
+      ),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (searching && errorMessage == null) ...[
+                const Icon(Icons.travel_explore, color: gold, size: 75),
+                const SizedBox(height: 25),
+                const CircularProgressIndicator(color: gold),
+              ] else ...[
+                Icon(
+                  errorMessage == null ? Icons.chat : Icons.error_outline,
+                  color: gold,
+                  size: 75,
+                ),
+              ],
+              const SizedBox(height: 25),
+              Text(
+                errorMessage == null ? status : errorMessage!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: gold,
+                  fontSize: 19,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Please wait while we look for someone available.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white54),
+              ),
+              const SizedBox(height: 30),
+              if (errorMessage != null)
+                ElevatedButton(
+                  onPressed: _startSearch,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: gold,
+                    foregroundColor: Colors.black,
+                  ),
+                  child: const Text('TRY AGAIN'),
+                ),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  await _leaveSearch();
+                  if (mounted) Navigator.pop(context);
+                },
+                icon: const Icon(Icons.close),
+                label: const Text('CANCEL SEARCH'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: gold,
+                  side: const BorderSide(color: gold),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// --------------------------------------------------
+// REAL-TIME CHAT
+// --------------------------------------------------
+
+class ChatScreen extends StatefulWidget {
+  final String chatId;
+  final String partnerUid;
+
+  const ChatScreen({
+    super.key,
+    required this.chatId,
+    required this.partnerUid,
+  });
+
+  @override
+  State<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends State<ChatScreen> {
+  final messageController = TextEditingController();
+  final scrollController = ScrollController();
+
+  bool sending = false;
+  bool leaving = false;
+  bool partnerLeft = false;
+  String partnerName = 'Stranger';
+
+  DocumentReference<Map<String, dynamic>> get chatRef =>
+      db.collection('chats').doc(widget.chatId);
+
+  CollectionReference<Map<String, dynamic>> get messagesRef =>
+      chatRef.collection('messages');
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPartner();
+  }
+
+  Future<void> _loadPartner() async {
+    try {
+      final doc = await db.collection('users').doc(widget.partnerUid).get();
+      if (!mounted) return;
+
+      setState(() {
+        partnerName = doc.data()?['name']?.toString() ?? 'Stranger';
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _sendMessage() async {
+    final text = messageController.text.trim();
+
+    if (text.isEmpty || sending || leaving) return;
+
+    if (text.length > 1000) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Message is too long.')),
+      );
+      return;
+    }
+
+    setState(() => sending = true);
+    messageController.clear();
+
+    try {
+      await messagesRef.add({
+        'senderId': auth.currentUser!.uid,
+        'text': text,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      await chatRef.update({
+        'lastMessage': text,
+        'lastMessageAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      if (mounted) {
+        messageController.text = text;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Message could not be sent.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => sending = false);
+    }
+  }
+
+  Future<void> _closeChat({required bool next}) async {
+    if (leaving) return;
+    leaving = true;
+
+    try {
+      await chatRef.update({
+        'active': false,
+        'endedBy': auth.currentUser!.uid,
+        'endedAt': FieldValue.serverTimestamp(),
+      });
+
+      await db.collection('matchQueue').doc(auth.currentUser!.uid).delete();
+    } catch (e) {
+      debugPrint('Chat close error: $e');
+    }
+
+    if (mounted) Navigator.pop(context, next);
+  }
+
+  Future<void> _reportUser() async {
+    String reason = 'Inappropriate behaviour';
+
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: panel,
+        title: const Text('Report Stranger'),
+        content: DropdownButtonFormField<String>(
+          value: reason,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            labelText: 'Reason',
+          ),
+          items: const [
+            DropdownMenuItem(
+              value: 'Inappropriate behaviour',
+              child: Text('Inappropriate behaviour'),
+            ),
+            DropdownMenuItem(
+              value: 'Harassment',
+              child: Text('Harassment'),
+            ),
+            DropdownMenuItem(
+              value: 'Spam or scam',
+              child: Text('Spam or scam'),
+            ),
+            DropdownMenuItem(
+              value: 'Other',
+              child: Text('Other'),
+            ),
+          ],
+          onChanged: (value) {
+            if (value != null) reason = value;
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('CANCEL'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, reason),
+            child: const Text('REPORT'),
+          ),
+        ],
+      ),
+    );
+
+    if (selected == null) return;
+
+    try {
+      await db.collection('reports').add({
+        'reporterId': auth.currentUser!.uid,
+        'reportedUid': widget.partnerUid,
+        'chatId': widget.chatId,
+        'reason': selected,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Report submitted. Thank you.')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not submit report.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _blockUser() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: panel,
+        title: const Text('Block this user?'),
+        content: const Text(
+          'You will not be matched with this user again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('CANCEL'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('BLOCK'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      await db
+          .collection('users')
+          .doc(auth.currentUser!.uid)
+          .collection('blocked')
+          .doc(widget.partnerUid)
+          .set({
+        'blockedAt': FieldValue.serverTimestamp(),
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('User blocked.')),
+        );
+      }
+
+      await _closeChat(next: false);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not block this user.')),
+        );
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    messageController.dispose();
+    scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && !leaving) _closeChat(next: false);
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                partnerName,
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const Text(
+                'Anonymous chat',
+                style: TextStyle(fontSize: 11, color: Colors.white54),
+              ),
+            ],
+          ),
+          actions: [
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert),
+              onSelected: (value) {
+                if (value == 'report') _reportUser();
+                if (value == 'block') _blockUser();
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: 'report',
+                  child: Text('Report User'),
+                ),
+                PopupMenuItem(
+                  value: 'block',
+                  child: Text('Block User'),
+                ),
+              ],
+            ),
+          ],
+        ),
+        body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: chatRef.snapshots(),
+          builder: (context, chatSnapshot) {
+            final chatData = chatSnapshot.data?.data();
+
+            if (chatData != null &&
+                chatData['active'] == false &&
+                !leaving) {
+              partnerLeft = true;
+            }
+
+            return Column(
+              children: [
+                if (partnerLeft)
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    color: const Color(0xFF302719),
+                    child: const Text(
+                      'The other person has left this chat.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: gold),
+                    ),
+                  ),
+                Expanded(
+                  child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                    stream: messagesRef
+                        .orderBy('createdAt', descending: false)
+                        .snapshots(),
+                    builder: (context, snapshot) {
+                      if (snapshot.hasError) {
+                        return const Center(
+                          child: Text('Could not load messages.'),
+                        );
+                      }
+
+                      if (snapshot.connectionState ==
+                          ConnectionState.waiting) {
+                        return const Center(
+                          child: CircularProgressIndicator(color: gold),
+                        );
+                      }
+
+                      final messages = snapshot.data?.docs ?? [];
+
+                      if (messages.isEmpty) {
+                        return const Center(
+                          child: Text(
+                            'Say hello! Start your conversation.',
+                            style: TextStyle(color: Colors.white54),
+                          ),
+                        );
+                      }
+
+                      return ListView.builder(
+                        padding: const EdgeInsets.all(15),
+                        itemCount: messages.length,
+                        itemBuilder: (context, index) {
+                          final data = messages[index].data();
+                          final mine =
+                              data['senderId'] == auth.currentUser!.uid;
+                          final text = data['text']?.toString() ?? '';
+
+                          return Align(
+                            alignment: mine
+                                ? Alignment.centerRight
+                                : Alignment.centerLeft,
+                            child: Container(
+                              constraints: BoxConstraints(
+                                maxWidth:
+                                    MediaQuery.of(context).size.width * .78,
+                              ),
+                              margin: const EdgeInsets.symmetric(vertical: 5),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 15,
+                                vertical: 11,
+                              ),
+                              decoration: BoxDecoration(
+                                color: mine
+                                    ? const Color(0xFF594521)
+                                    : panel,
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(
+                                  color: mine
+                                      ? gold.withOpacity(.5)
+                                      : Colors.white12,
+                                ),
+                              ),
+                              child: Text(text),
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 15),
+                  decoration: const BoxDecoration(
+                    color: panel,
+                    border: Border(
+                      top: BorderSide(color: Colors.white12),
+                    ),
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: messageController,
+                              enabled: !partnerLeft && !leaving,
+                              minLines: 1,
+                              maxLines: 4,
+                              decoration: InputDecoration(
+                                hintText: 'Type a message...',
+                                filled: true,
+                                fillColor: bg,
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(25),
+                                  borderSide: BorderSide.none,
+                                ),
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 18,
+                                  vertical: 12,
+                                ),
+                              ),
+                              onSubmitted: (_) => _sendMessage(),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          IconButton(
+                            onPressed:
+                                sending || partnerLeft ? null : _sendMessage,
+                            icon: const Icon(Icons.send, color: gold),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: leaving
+                                  ? null
+                                  : () => _closeChat(next: true),
+                              icon: const Icon(Icons.skip_next),
+                              label: const Text('NEXT'),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: gold,
+                                side: const BorderSide(color: gold),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: leaving
+                                  ? null
+                                  : () => _closeChat(next: false),
+                              icon: const Icon(Icons.stop),
+                              label: const Text('STOP'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: gold,
+                                foregroundColor: Colors.black,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -696,7 +1478,7 @@ class PremiumScreen extends StatelessWidget {
     BuildContext context,
     String preference,
   ) async {
-    final user = FirebaseAuth.instance.currentUser!;
+    final user = auth.currentUser!;
 
     try {
       await db.collection('users').doc(user.uid).set({
@@ -708,7 +1490,7 @@ class PremiumScreen extends StatelessWidget {
           const SnackBar(content: Text('Gender preference saved.')),
         );
       }
-    } catch (e) {
+    } catch (_) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Could not save preference.')),
@@ -719,7 +1501,7 @@ class PremiumScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final user = FirebaseAuth.instance.currentUser!;
+    final user = auth.currentUser!;
 
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: db.collection('users').doc(user.uid).snapshots(),
@@ -841,7 +1623,7 @@ class ProfileScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final user = FirebaseAuth.instance.currentUser!;
+    final user = auth.currentUser!;
 
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: db.collection('users').doc(user.uid).snapshots(),
@@ -858,10 +1640,10 @@ class ProfileScreen extends StatelessWidget {
           padding: const EdgeInsets.all(20),
           children: [
             const SizedBox(height: 15),
-            CircleAvatar(
+            const CircleAvatar(
               radius: 48,
-              backgroundColor: const Color(0xFF302719),
-              child: const Icon(Icons.person, size: 48, color: gold),
+              backgroundColor: Color(0xFF302719),
+              child: Icon(Icons.person, size: 48, color: gold),
             ),
             const SizedBox(height: 14),
             Text(
@@ -911,18 +1693,16 @@ class ProfileScreen extends StatelessWidget {
               icon: Icons.edit,
               title: 'Edit Profile',
               subtitle: 'Change your name, gender and bio',
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => EditProfileScreen(
-                      currentName: name,
-                      currentBio: bio,
-                      currentGender: gender,
-                    ),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => EditProfileScreen(
+                    currentName: name,
+                    currentBio: bio,
+                    currentGender: gender,
                   ),
-                );
-              },
+                ),
+              ),
             ),
             _ActionTile(
               icon: Icons.share_rounded,
@@ -961,7 +1741,7 @@ class ProfileScreen extends StatelessWidget {
               title: 'Logout',
               subtitle: 'Sign out of your account',
               onTap: () async {
-                await FirebaseAuth.instance.signOut();
+                await auth.signOut();
                 await GoogleSignIn().signOut();
               },
             ),
@@ -1033,7 +1813,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     });
 
     try {
-      final user = FirebaseAuth.instance.currentUser!;
+      final user = auth.currentUser!;
 
       await db.collection('users').doc(user.uid).set({
         'name': name,
@@ -1048,9 +1828,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       );
 
       Navigator.pop(context);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => message = 'Could not update profile. Please try again.');
+    } catch (_) {
+      if (mounted) {
+        setState(() => message = 'Could not update profile. Please try again.');
+      }
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -1199,7 +1980,7 @@ class OwnerSocialsScreen extends StatelessWidget {
 }
 
 // --------------------------------------------------
-// OWNER ADMIN LOGIN
+// ADMIN LOGIN
 // --------------------------------------------------
 
 class AdminAccessScreen extends StatefulWidget {
@@ -1237,21 +2018,18 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
       UserCredential credential;
 
       if (isRegister) {
-        credential = await FirebaseAuth.instance
-            .createUserWithEmailAndPassword(
+        credential = await auth.createUserWithEmailAndPassword(
           email: email,
           password: password,
         );
       } else {
-        credential = await FirebaseAuth.instance
-            .signInWithEmailAndPassword(
+        credential = await auth.signInWithEmailAndPassword(
           email: email,
           password: password,
         );
       }
 
       final user = credential.user!;
-
       final adminDoc = await db.collection('admins').doc(user.uid).get();
 
       if (!mounted) return;
@@ -1271,11 +2049,9 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
         });
       }
     } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-      setState(() => message = e.message ?? 'Authentication failed.');
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => message = 'Something went wrong. Please try again.');
+      if (mounted) setState(() => message = e.message ?? 'Login failed.');
+    } catch (_) {
+      if (mounted) setState(() => message = 'Something went wrong.');
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -1388,7 +2164,7 @@ class AdminDashboardScreen extends StatelessWidget {
             IconButton(
               icon: const Icon(Icons.logout),
               onPressed: () async {
-                await FirebaseAuth.instance.signOut();
+                await auth.signOut();
                 if (context.mounted) Navigator.pop(context);
               },
             ),
@@ -1413,27 +2189,23 @@ class AdminDashboardScreen extends StatelessWidget {
               icon: Icons.manage_accounts,
               title: 'User Management',
               subtitle: 'View, ban and unban users',
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => const UserManagementScreen(),
-                  ),
-                );
-              },
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const UserManagementScreen(),
+                ),
+              ),
             ),
             _ActionTile(
               icon: Icons.workspace_premium,
               title: 'Premium Management',
               subtitle: 'Give Premium for 1, 7 or 30 days',
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => const UserManagementScreen(),
-                  ),
-                );
-              },
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const UserManagementScreen(),
+                ),
+              ),
             ),
             const SizedBox(height: 15),
             const _Feature(text: 'Reports and broadcasts'),
@@ -1451,7 +2223,7 @@ class AdminDashboardScreen extends StatelessWidget {
 }
 
 // --------------------------------------------------
-// USER MANAGEMENT AND PREMIUM DURATION
+// USER MANAGEMENT AND PREMIUM
 // --------------------------------------------------
 
 class UserManagementScreen extends StatelessWidget {
@@ -1480,7 +2252,7 @@ class UserManagementScreen extends StatelessWidget {
           ),
         );
       }
-    } catch (e) {
+    } catch (_) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Action failed.')),
@@ -1507,7 +2279,7 @@ class UserManagementScreen extends StatelessWidget {
           SnackBar(content: Text('Premium activated for $days day(s).')),
         );
       }
-    } catch (e) {
+    } catch (_) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Could not activate Premium.')),
@@ -1531,7 +2303,7 @@ class UserManagementScreen extends StatelessWidget {
           const SnackBar(content: Text('Premium deactivated.')),
         );
       }
-    } catch (e) {
+    } catch (_) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Could not deactivate Premium.')),
@@ -1588,8 +2360,7 @@ class UserManagementScreen extends StatelessWidget {
             return const _EmptyState(
               icon: Icons.error_outline,
               title: 'Could not load users',
-              subtitle:
-                  'Check Firestore security rules and internet connection.',
+              subtitle: 'Check Firestore rules and internet connection.',
             );
           }
 
@@ -1712,12 +2483,12 @@ class UserManagementScreen extends StatelessWidget {
                               _removePremium(context, document.id);
                             }
                           },
-                          itemBuilder: (_) => [
-                            const PopupMenuItem(
+                          itemBuilder: (_) => const [
+                            PopupMenuItem(
                               value: 'give',
                               child: Text('Give / Renew Premium'),
                             ),
-                            const PopupMenuItem(
+                            PopupMenuItem(
                               value: 'remove',
                               child: Text('Deactivate Premium'),
                             ),
@@ -1750,7 +2521,7 @@ class UserManagementScreen extends StatelessWidget {
 }
 
 // --------------------------------------------------
-// REUSABLE ACTION TILE
+// REUSABLE WIDGETS
 // --------------------------------------------------
 
 class _ActionTile extends StatelessWidget {
@@ -1785,10 +2556,6 @@ class _ActionTile extends StatelessWidget {
         ),
       );
 }
-
-// --------------------------------------------------
-// STAT CARD
-// --------------------------------------------------
 
 class _StatCard extends StatelessWidget {
   final String label;
@@ -1829,10 +2596,6 @@ class _StatCard extends StatelessWidget {
       );
 }
 
-// --------------------------------------------------
-// FEATURE ROW
-// --------------------------------------------------
-
 class _Feature extends StatelessWidget {
   final String text;
 
@@ -1850,10 +2613,6 @@ class _Feature extends StatelessWidget {
         ),
       );
 }
-
-// --------------------------------------------------
-// EMPTY STATE
-// --------------------------------------------------
 
 class _EmptyState extends StatelessWidget {
   final IconData icon;
