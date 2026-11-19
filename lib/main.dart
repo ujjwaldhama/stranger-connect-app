@@ -10,6 +10,8 @@ const gold = Color(0xFFD6AD55);
 const bg = Color(0xFF090909);
 const panel = Color(0xFF171717);
 
+final db = FirebaseFirestore.instance;
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
@@ -45,6 +47,55 @@ class StrangerConnectApp extends StatelessWidget {
 }
 
 // --------------------------------------------------
+// PREMIUM STATUS
+// --------------------------------------------------
+
+bool isPremiumActive(Map<String, dynamic>? data) {
+  if (data == null || data['isPremium'] != true) return false;
+
+  final expiry = data['premiumExpiresAt'];
+
+  // Older admin-enabled Premium accounts without an expiry
+  // remain active until the admin sets or removes Premium.
+  if (expiry == null) return true;
+
+  DateTime? expiryDate;
+
+  if (expiry is Timestamp) {
+    expiryDate = expiry.toDate();
+  } else if (expiry is DateTime) {
+    expiryDate = expiry;
+  }
+
+  if (expiryDate == null) return false;
+
+  return DateTime.now().isBefore(expiryDate);
+}
+
+String premiumRemaining(Map<String, dynamic>? data) {
+  final expiry = data?['premiumExpiresAt'];
+
+  if (expiry == null) return 'Active';
+
+  if (expiry is! Timestamp) return 'Inactive';
+
+  final difference = expiry.toDate().difference(DateTime.now());
+
+  if (difference.isNegative || difference.inSeconds <= 0) {
+    return 'Expired';
+  }
+
+  if (difference.inDays >= 1) {
+    return '${difference.inDays} day(s) remaining';
+  }
+
+  final hours = difference.inHours;
+  if (hours >= 1) return '$hours hour(s) remaining';
+
+  return '${difference.inMinutes} minute(s) remaining';
+}
+
+// --------------------------------------------------
 // AUTH GATE
 // --------------------------------------------------
 
@@ -58,15 +109,11 @@ class AuthGate extends StatelessWidget {
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
-            body: Center(
-              child: CircularProgressIndicator(color: gold),
-            ),
+            body: Center(child: CircularProgressIndicator(color: gold)),
           );
         }
 
-        if (snapshot.data == null) {
-          return const AuthScreen();
-        }
+        if (snapshot.data == null) return const AuthScreen();
 
         return const HomeScreen();
       },
@@ -78,14 +125,8 @@ class AuthGate extends StatelessWidget {
 // SAVE USER PROFILE
 // --------------------------------------------------
 
-Future<void> saveUserProfile(
-  User user, {
-  String? name,
-}) async {
-  final reference = FirebaseFirestore.instance
-      .collection('users')
-      .doc(user.uid);
-
+Future<void> saveUserProfile(User user, {String? name}) async {
+  final reference = db.collection('users').doc(user.uid);
   final document = await reference.get();
 
   if (!document.exists) {
@@ -100,9 +141,7 @@ Future<void> saveUserProfile(
   } else {
     final updates = <String, dynamic>{};
 
-    if (user.email != null) {
-      updates['email'] = user.email;
-    }
+    if (user.email != null) updates['email'] = user.email;
 
     if (name != null && name.trim().isNotEmpty) {
       updates['name'] = name.trim();
@@ -170,10 +209,7 @@ class _AuthScreenState extends State<AuthScreen> {
           password: password,
         );
 
-        await saveUserProfile(
-          credential.user!,
-          name: name,
-        );
+        await saveUserProfile(credential.user!, name: name);
       } else {
         credential = await FirebaseAuth.instance
             .signInWithEmailAndPassword(
@@ -185,20 +221,12 @@ class _AuthScreenState extends State<AuthScreen> {
       }
     } on FirebaseAuthException catch (e) {
       if (!mounted) return;
-
-      setState(() {
-        message = e.message ?? 'Authentication failed.';
-      });
+      setState(() => message = e.message ?? 'Authentication failed.');
     } catch (e) {
       if (!mounted) return;
-
-      setState(() {
-        message = 'Something went wrong. Please try again.';
-      });
+      setState(() => message = 'Something went wrong. Please try again.');
     } finally {
-      if (mounted) {
-        setState(() => loading = false);
-      }
+      if (mounted) setState(() => loading = false);
     }
   }
 
@@ -229,20 +257,12 @@ class _AuthScreenState extends State<AuthScreen> {
       await saveUserProfile(result.user!);
     } on FirebaseAuthException catch (e) {
       if (!mounted) return;
-
-      setState(() {
-        message = e.message ?? 'Google sign-in failed.';
-      });
+      setState(() => message = e.message ?? 'Google sign-in failed.');
     } catch (e) {
       if (!mounted) return;
-
-      setState(() {
-        message = 'Google sign-in failed. Please try again.';
-      });
+      setState(() => message = 'Google sign-in failed. Please try again.');
     } finally {
-      if (mounted) {
-        setState(() => loading = false);
-      }
+      if (mounted) setState(() => loading = false);
     }
   }
 
@@ -255,21 +275,13 @@ class _AuthScreenState extends State<AuthScreen> {
     }
 
     try {
-      await FirebaseAuth.instance.sendPasswordResetEmail(
-        email: email,
-      );
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
 
       if (!mounted) return;
-
-      setState(() {
-        message = 'Password reset email sent.';
-      });
+      setState(() => message = 'Password reset email sent.');
     } on FirebaseAuthException catch (e) {
       if (!mounted) return;
-
-      setState(() {
-        message = e.message ?? 'Could not send reset email.';
-      });
+      setState(() => message = e.message ?? 'Could not send reset email.');
     }
   }
 
@@ -289,11 +301,7 @@ class _AuthScreenState extends State<AuthScreen> {
           padding: const EdgeInsets.all(24),
           child: Column(
             children: [
-              const Icon(
-                Icons.forum_rounded,
-                color: gold,
-                size: 65,
-              ),
+              const Icon(Icons.forum_rounded, color: gold, size: 65),
               const SizedBox(height: 12),
               const Text(
                 'STRANGER CONNECT',
@@ -319,7 +327,6 @@ class _AuthScreenState extends State<AuthScreen> {
                 ),
               ),
               const SizedBox(height: 25),
-
               if (isRegister) ...[
                 TextField(
                   controller: nameController,
@@ -332,7 +339,6 @@ class _AuthScreenState extends State<AuthScreen> {
                 ),
                 const SizedBox(height: 15),
               ],
-
               TextField(
                 controller: emailController,
                 keyboardType: TextInputType.emailAddress,
@@ -343,7 +349,6 @@ class _AuthScreenState extends State<AuthScreen> {
                 ),
               ),
               const SizedBox(height: 15),
-
               TextField(
                 controller: passwordController,
                 obscureText: obscurePassword,
@@ -353,19 +358,14 @@ class _AuthScreenState extends State<AuthScreen> {
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
                     onPressed: () {
-                      setState(() {
-                        obscurePassword = !obscurePassword;
-                      });
+                      setState(() => obscurePassword = !obscurePassword);
                     },
                     icon: Icon(
-                      obscurePassword
-                          ? Icons.visibility
-                          : Icons.visibility_off,
+                      obscurePassword ? Icons.visibility : Icons.visibility_off,
                     ),
                   ),
                 ),
               ),
-
               if (!isRegister)
                 Align(
                   alignment: Alignment.centerRight,
@@ -377,9 +377,7 @@ class _AuthScreenState extends State<AuthScreen> {
                     ),
                   ),
                 ),
-
               const SizedBox(height: 12),
-
               if (message.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
@@ -389,7 +387,6 @@ class _AuthScreenState extends State<AuthScreen> {
                     style: const TextStyle(color: gold),
                   ),
                 ),
-
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -410,31 +407,22 @@ class _AuthScreenState extends State<AuthScreen> {
                         )
                       : Text(
                           isRegister ? 'SIGN UP' : 'LOGIN',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                          ),
+                          style: const TextStyle(fontWeight: FontWeight.bold),
                         ),
                 ),
               ),
-
               const SizedBox(height: 15),
-
-              Row(
-                children: const [
+              const Row(
+                children: [
                   Expanded(child: Divider(color: Colors.white24)),
                   Padding(
                     padding: EdgeInsets.symmetric(horizontal: 12),
-                    child: Text(
-                      'OR',
-                      style: TextStyle(color: Colors.white54),
-                    ),
+                    child: Text('OR', style: TextStyle(color: Colors.white54)),
                   ),
                   Expanded(child: Divider(color: Colors.white24)),
                 ],
               ),
-
               const SizedBox(height: 15),
-
               SizedBox(
                 width: double.infinity,
                 child: OutlinedButton.icon(
@@ -448,9 +436,7 @@ class _AuthScreenState extends State<AuthScreen> {
                   ),
                 ),
               ),
-
               const SizedBox(height: 18),
-
               TextButton(
                 onPressed: loading
                     ? null
@@ -614,10 +600,7 @@ class DiscoverScreen extends StatelessWidget {
                 children: [
                   Icon(Icons.shield_moon_outlined, color: gold, size: 18),
                   SizedBox(width: 7),
-                  Text(
-                    'Private by design',
-                    style: TextStyle(color: gold),
-                  ),
+                  Text('Private by design', style: TextStyle(color: gold)),
                 ],
               ),
             ],
@@ -703,43 +686,150 @@ class FriendsScreen extends StatelessWidget {
 }
 
 // --------------------------------------------------
-// PREMIUM
+// PREMIUM AND GENDER FILTER
 // --------------------------------------------------
 
 class PremiumScreen extends StatelessWidget {
   const PremiumScreen({super.key});
 
+  Future<void> savePreference(
+    BuildContext context,
+    String preference,
+  ) async {
+    final user = FirebaseAuth.instance.currentUser!;
+
+    try {
+      await db.collection('users').doc(user.uid).set({
+        'preferredGender': preference,
+      }, SetOptions(merge: true));
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Gender preference saved.')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not save preference.')),
+        );
+      }
+    }
+  }
+
   @override
-  Widget build(BuildContext context) => ListView(
-        padding: const EdgeInsets.all(20),
-        children: [
-          const Icon(
-            Icons.workspace_premium_rounded,
-            color: gold,
-            size: 58,
-          ),
-          const SizedBox(height: 12),
-          const Text(
-            'GO PREMIUM',
-            textAlign: TextAlign.center,
-            style: TextStyle(
+  Widget build(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser!;
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: db.collection('users').doc(user.uid).snapshots(),
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data();
+        final premium = isPremiumActive(data);
+        final preference = data?['preferredGender']?.toString() ?? 'Both';
+
+        return ListView(
+          padding: const EdgeInsets.all(20),
+          children: [
+            const Icon(
+              Icons.workspace_premium_rounded,
               color: gold,
-              fontSize: 27,
-              fontWeight: FontWeight.w900,
+              size: 58,
             ),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Unlock more ways to connect.',
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 24),
-          const _Feature(text: 'Gender preference filters'),
-          const _Feature(text: 'Premium profile badge'),
-          const _Feature(text: 'Priority matching options'),
-          const _Feature(text: 'More profile customisation'),
-        ],
-      );
+            const SizedBox(height: 12),
+            const Text(
+              'GO PREMIUM',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: gold,
+                fontSize: 27,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Unlock more ways to connect.',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 20),
+            Card(
+              color: panel,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.workspace_premium, color: gold),
+                        const SizedBox(width: 10),
+                        Text(
+                          premium ? 'PREMIUM ACTIVE' : 'FREE MEMBERSHIP',
+                          style: const TextStyle(
+                            color: gold,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      premium
+                          ? premiumRemaining(data)
+                          : 'Gender filters are available to Premium members.',
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'GENDER PREFERENCE FILTER',
+              style: TextStyle(color: gold, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              value: ['Male', 'Female', 'Both'].contains(preference)
+                  ? preference
+                  : 'Both',
+              decoration: InputDecoration(
+                border: const OutlineInputBorder(),
+                prefixIcon: Icon(
+                  premium ? Icons.people_alt_outlined : Icons.lock_outline,
+                ),
+                helperText: premium
+                    ? 'Choose who you want to meet.'
+                    : 'Upgrade to Premium to unlock this filter.',
+              ),
+              items: const [
+                DropdownMenuItem(value: 'Male', child: Text('Male')),
+                DropdownMenuItem(value: 'Female', child: Text('Female')),
+                DropdownMenuItem(value: 'Both', child: Text('Both')),
+              ],
+              onChanged: premium
+                  ? (value) {
+                      if (value != null) savePreference(context, value);
+                    }
+                  : null,
+            ),
+            if (!premium) ...[
+              const SizedBox(height: 12),
+              const Text(
+                'The gender filter is locked for free accounts.',
+                style: TextStyle(color: Colors.white54),
+              ),
+            ],
+            const SizedBox(height: 25),
+            const _Feature(text: 'Gender preference filters'),
+            const _Feature(text: 'Premium profile badge'),
+            const _Feature(text: 'Priority matching options'),
+            const _Feature(text: 'More profile customisation'),
+          ],
+        );
+      },
+    );
+  }
 }
 
 // --------------------------------------------------
@@ -754,18 +844,15 @@ class ProfileScreen extends StatelessWidget {
     final user = FirebaseAuth.instance.currentUser!;
 
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .snapshots(),
+      stream: db.collection('users').doc(user.uid).snapshots(),
       builder: (context, snapshot) {
         final data = snapshot.data?.data();
-
         final name = data?['name']?.toString() ??
             user.displayName ??
             'New Member';
-
         final bio = data?['bio']?.toString() ?? '';
+        final gender = data?['gender']?.toString() ?? '';
+        final premium = isPremiumActive(data);
 
         return ListView(
           padding: const EdgeInsets.all(20),
@@ -774,11 +861,7 @@ class ProfileScreen extends StatelessWidget {
             CircleAvatar(
               radius: 48,
               backgroundColor: const Color(0xFF302719),
-              child: const Icon(
-                Icons.person,
-                size: 48,
-                color: gold,
-              ),
+              child: const Icon(Icons.person, size: 48, color: gold),
             ),
             const SizedBox(height: 14),
             Text(
@@ -795,6 +878,28 @@ class ProfileScreen extends StatelessWidget {
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white54),
             ),
+            if (gender.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                gender,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: gold),
+              ),
+            ],
+            if (premium) ...[
+              const SizedBox(height: 8),
+              const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.workspace_premium, color: gold, size: 18),
+                  SizedBox(width: 5),
+                  Text(
+                    'PREMIUM MEMBER',
+                    style: TextStyle(color: gold, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: 8),
             Text(
               bio.isEmpty ? 'Add a short bio about yourself.' : bio,
@@ -802,11 +907,10 @@ class ProfileScreen extends StatelessWidget {
               style: const TextStyle(color: Colors.white70),
             ),
             const SizedBox(height: 25),
-
             _ActionTile(
               icon: Icons.edit,
               title: 'Edit Profile',
-              subtitle: 'Change your name and bio',
+              subtitle: 'Change your name, gender and bio',
               onTap: () {
                 Navigator.push(
                   context,
@@ -814,12 +918,12 @@ class ProfileScreen extends StatelessWidget {
                     builder: (_) => EditProfileScreen(
                       currentName: name,
                       currentBio: bio,
+                      currentGender: gender,
                     ),
                   ),
                 );
               },
             ),
-
             _ActionTile(
               icon: Icons.share_rounded,
               title: 'Owner Socials',
@@ -831,7 +935,6 @@ class ProfileScreen extends StatelessWidget {
                 ),
               ),
             ),
-
             _ActionTile(
               icon: Icons.support_agent_rounded,
               title: 'Customer Care',
@@ -841,7 +944,6 @@ class ProfileScreen extends StatelessWidget {
                 'https://t.me/ujjwal_jaat01',
               ),
             ),
-
             _ActionTile(
               icon: Icons.admin_panel_settings_rounded,
               title: 'Owner Admin Panel',
@@ -853,9 +955,7 @@ class ProfileScreen extends StatelessWidget {
                 ),
               ),
             ),
-
             const SizedBox(height: 15),
-
             _ActionTile(
               icon: Icons.logout,
               title: 'Logout',
@@ -879,11 +979,13 @@ class ProfileScreen extends StatelessWidget {
 class EditProfileScreen extends StatefulWidget {
   final String currentName;
   final String currentBio;
+  final String currentGender;
 
   const EditProfileScreen({
     super.key,
     required this.currentName,
     required this.currentBio,
+    required this.currentGender,
   });
 
   @override
@@ -894,6 +996,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   late final TextEditingController nameController;
   late final TextEditingController bioController;
 
+  String? gender;
   bool loading = false;
   String message = '';
 
@@ -902,6 +1005,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     super.initState();
     nameController = TextEditingController(text: widget.currentName);
     bioController = TextEditingController(text: widget.currentBio);
+    gender = widget.currentGender.isEmpty ? null : widget.currentGender;
   }
 
   Future<void> saveProfile() async {
@@ -910,6 +1014,11 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
     if (name.isEmpty) {
       setState(() => message = 'Name cannot be empty.');
+      return;
+    }
+
+    if (gender == null) {
+      setState(() => message = 'Please select your gender.');
       return;
     }
 
@@ -926,12 +1035,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     try {
       final user = FirebaseAuth.instance.currentUser!;
 
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .set({
+      await db.collection('users').doc(user.uid).set({
         'name': name,
         'bio': bio,
+        'gender': gender,
       }, SetOptions(merge: true));
 
       if (!mounted) return;
@@ -943,14 +1050,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       Navigator.pop(context);
     } catch (e) {
       if (!mounted) return;
-
-      setState(() {
-        message = 'Could not update profile. Please try again.';
-      });
+      setState(() => message = 'Could not update profile. Please try again.');
     } finally {
-      if (mounted) {
-        setState(() => loading = false);
-      }
+      if (mounted) setState(() => loading = false);
     }
   }
 
@@ -984,6 +1086,20 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
             ),
           ),
           const SizedBox(height: 15),
+          DropdownButtonFormField<String>(
+            value: gender,
+            decoration: const InputDecoration(
+              labelText: 'Your Gender',
+              prefixIcon: Icon(Icons.wc),
+              border: OutlineInputBorder(),
+            ),
+            items: const [
+              DropdownMenuItem(value: 'Male', child: Text('Male')),
+              DropdownMenuItem(value: 'Female', child: Text('Female')),
+            ],
+            onChanged: (value) => setState(() => gender = value),
+          ),
+          const SizedBox(height: 15),
           TextField(
             controller: bioController,
             maxLength: 160,
@@ -997,10 +1113,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           if (message.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(bottom: 12),
-              child: Text(
-                message,
-                style: const TextStyle(color: gold),
-              ),
+              child: Text(message, style: const TextStyle(color: gold)),
             ),
           ElevatedButton(
             onPressed: loading ? null : saveProfile,
@@ -1023,16 +1136,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 // EXTERNAL LINKS
 // --------------------------------------------------
 
-Future<void> _openExternal(
-  BuildContext context,
-  String value,
-) async {
+Future<void> _openExternal(BuildContext context, String value) async {
   final uri = Uri.parse(value);
 
-  if (!await launchUrl(
-        uri,
-        mode: LaunchMode.externalApplication,
-      ) &&
+  if (!await launchUrl(uri, mode: LaunchMode.externalApplication) &&
       context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Could not open this link.')),
@@ -1066,10 +1173,7 @@ class OwnerSocialsScreen extends StatelessWidget {
               icon: Icons.send,
               title: 'Telegram',
               subtitle: '@ujjwalmoder',
-              onTap: () => _openExternal(
-                context,
-                'https://t.me/ujjwalmoder',
-              ),
+              onTap: () => _openExternal(context, 'https://t.me/ujjwalmoder'),
             ),
             _ActionTile(
               icon: Icons.play_circle_fill,
@@ -1102,8 +1206,7 @@ class AdminAccessScreen extends StatefulWidget {
   const AdminAccessScreen({super.key});
 
   @override
-  State<AdminAccessScreen> createState() =>
-      _AdminAccessScreenState();
+  State<AdminAccessScreen> createState() => _AdminAccessScreenState();
 }
 
 class _AdminAccessScreenState extends State<AdminAccessScreen> {
@@ -1149,15 +1252,11 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
 
       final user = credential.user!;
 
-      final adminDoc = await FirebaseFirestore.instance
-          .collection('admins')
-          .doc(user.uid)
-          .get();
+      final adminDoc = await db.collection('admins').doc(user.uid).get();
 
       if (!mounted) return;
 
-      if (adminDoc.exists &&
-          adminDoc.data()?['role'] == 'admin') {
+      if (adminDoc.exists && adminDoc.data()?['role'] == 'admin') {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
@@ -1173,18 +1272,12 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
       }
     } on FirebaseAuthException catch (e) {
       if (!mounted) return;
-      setState(() {
-        message = e.message ?? 'Authentication failed.';
-      });
+      setState(() => message = e.message ?? 'Authentication failed.');
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        message = 'Something went wrong. Please try again.';
-      });
+      setState(() => message = 'Something went wrong. Please try again.');
     } finally {
-      if (mounted) {
-        setState(() => loading = false);
-      }
+      if (mounted) setState(() => loading = false);
     }
   }
 
@@ -1255,9 +1348,7 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
                     ),
                     onPressed: loading ? null : submit,
                     child: loading
-                        ? const CircularProgressIndicator(
-                            color: Colors.black,
-                          )
+                        ? const CircularProgressIndicator(color: Colors.black)
                         : Text(isRegister ? 'CREATE ACCOUNT' : 'LOGIN'),
                   ),
                 ),
@@ -1298,10 +1389,7 @@ class AdminDashboardScreen extends StatelessWidget {
               icon: const Icon(Icons.logout),
               onPressed: () async {
                 await FirebaseAuth.instance.signOut();
-
-                if (context.mounted) {
-                  Navigator.pop(context);
-                }
+                if (context.mounted) Navigator.pop(context);
               },
             ),
           ],
@@ -1309,11 +1397,7 @@ class AdminDashboardScreen extends StatelessWidget {
         body: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            const Icon(
-              Icons.verified_user,
-              color: gold,
-              size: 65,
-            ),
+            const Icon(Icons.verified_user, color: gold, size: 65),
             const SizedBox(height: 15),
             const Text(
               'Welcome, Owner Admin',
@@ -1341,7 +1425,7 @@ class AdminDashboardScreen extends StatelessWidget {
             _ActionTile(
               icon: Icons.workspace_premium,
               title: 'Premium Management',
-              subtitle: 'Activate or deactivate user Premium',
+              subtitle: 'Give Premium for 1, 7 or 30 days',
               onTap: () {
                 Navigator.push(
                   context,
@@ -1367,7 +1451,7 @@ class AdminDashboardScreen extends StatelessWidget {
 }
 
 // --------------------------------------------------
-// USER MANAGEMENT
+// USER MANAGEMENT AND PREMIUM DURATION
 // --------------------------------------------------
 
 class UserManagementScreen extends StatelessWidget {
@@ -1380,10 +1464,7 @@ class UserManagementScreen extends StatelessWidget {
     bool value,
   ) async {
     try {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(userId)
-          .set(
+      await db.collection('users').doc(userId).set(
         {field: value},
         SetOptions(merge: true),
       );
@@ -1394,9 +1475,7 @@ class UserManagementScreen extends StatelessWidget {
             content: Text(
               field == 'isBanned'
                   ? (value ? 'User banned.' : 'User unbanned.')
-                  : (value
-                      ? 'Premium activated.'
-                      : 'Premium deactivated.'),
+                  : (value ? 'Premium activated.' : 'Premium deactivated.'),
             ),
           ),
         );
@@ -1410,14 +1489,100 @@ class UserManagementScreen extends StatelessWidget {
     }
   }
 
+  Future<void> _setPremium(
+    BuildContext context,
+    String userId,
+    int days,
+  ) async {
+    try {
+      final expiry = DateTime.now().add(Duration(days: days));
+
+      await db.collection('users').doc(userId).set({
+        'isPremium': true,
+        'premiumExpiresAt': Timestamp.fromDate(expiry),
+      }, SetOptions(merge: true));
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Premium activated for $days day(s).')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not activate Premium.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _removePremium(
+    BuildContext context,
+    String userId,
+  ) async {
+    try {
+      await db.collection('users').doc(userId).set({
+        'isPremium': false,
+        'premiumExpiresAt': FieldValue.delete(),
+      }, SetOptions(merge: true));
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Premium deactivated.')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not deactivate Premium.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _showPremiumOptions(
+    BuildContext context,
+    String userId,
+  ) async {
+    await showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: panel,
+        title: const Text('Give Premium'),
+        content: const Text('Select Premium duration.'),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              _setPremium(context, userId, 1);
+            },
+            child: const Text('1 Day'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              _setPremium(context, userId, 7);
+            },
+            child: const Text('7 Days'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              _setPremium(context, userId, 30);
+            },
+            child: const Text('1 Month'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('USER MANAGEMENT')),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: FirebaseFirestore.instance
-            .collection('users')
-            .snapshots(),
+        stream: db.collection('users').snapshots(),
         builder: (context, snapshot) {
           if (snapshot.hasError) {
             return const _EmptyState(
@@ -1454,7 +1619,7 @@ class UserManagementScreen extends StatelessWidget {
               final email = data['email']?.toString() ?? 'No email';
               final name = data['name']?.toString() ?? 'User';
               final isBanned = data['isBanned'] == true;
-              final isPremium = data['isPremium'] == true;
+              final premium = isPremiumActive(data);
 
               return Card(
                 color: panel,
@@ -1525,24 +1690,52 @@ class UserManagementScreen extends StatelessWidget {
                           );
                         },
                       ),
-                      SwitchListTile(
+                      const Divider(color: Colors.white12),
+                      ListTile(
                         contentPadding: EdgeInsets.zero,
-                        activeColor: gold,
+                        leading: const Icon(
+                          Icons.workspace_premium,
+                          color: gold,
+                        ),
                         title: const Text('Premium Membership'),
                         subtitle: Text(
-                          isPremium
-                              ? 'Premium is active'
-                              : 'Premium is inactive',
+                          premium
+                              ? premiumRemaining(data)
+                              : 'Premium inactive or expired',
                         ),
-                        value: isPremium,
-                        onChanged: (value) {
-                          _changeUserStatus(
-                            context,
-                            document.id,
-                            'isPremium',
-                            value,
-                          );
-                        },
+                        trailing: PopupMenuButton<String>(
+                          icon: const Icon(Icons.more_vert, color: gold),
+                          onSelected: (value) {
+                            if (value == 'give') {
+                              _showPremiumOptions(context, document.id);
+                            } else {
+                              _removePremium(context, document.id);
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'give',
+                              child: Text('Give / Renew Premium'),
+                            ),
+                            const PopupMenuItem(
+                              value: 'remove',
+                              child: Text('Deactivate Premium'),
+                            ),
+                          ],
+                        ),
+                      ),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          onPressed: () =>
+                              _showPremiumOptions(context, document.id),
+                          icon: const Icon(Icons.add_circle_outline),
+                          label: const Text('GIVE PREMIUM'),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: gold,
+                            side: const BorderSide(color: gold),
+                          ),
+                        ),
                       ),
                     ],
                   ),
@@ -1586,10 +1779,7 @@ class _ActionTile extends StatelessWidget {
           ),
           subtitle: Text(
             subtitle,
-            style: const TextStyle(
-              color: Colors.white54,
-              fontSize: 12,
-            ),
+            style: const TextStyle(color: Colors.white54, fontSize: 12),
           ),
           trailing: const Icon(Icons.chevron_right, color: gold),
         ),
@@ -1613,10 +1803,7 @@ class _StatCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(
-          vertical: 15,
-          horizontal: 8,
-        ),
+        padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 8),
         decoration: BoxDecoration(
           color: panel,
           borderRadius: BorderRadius.circular(15),
@@ -1635,10 +1822,7 @@ class _StatCard extends StatelessWidget {
             ),
             Text(
               label,
-              style: const TextStyle(
-                color: Colors.white54,
-                fontSize: 11,
-              ),
+              style: const TextStyle(color: Colors.white54, fontSize: 11),
             ),
           ],
         ),
