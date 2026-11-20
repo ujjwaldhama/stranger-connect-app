@@ -28,6 +28,25 @@ jobs:
 
       - name: Generate Android project files
         run: flutter create --platforms=android .
+        
+              - name: Set STRENZO App Name
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("android/app/src/main/AndroidManifest.xml")
+          content = path.read_text()
+
+          content = re.sub(
+              r'android:label="[^"]*"',
+              'android:label="STRENZO"',
+              content,
+              count=1
+          )
+
+          path.write_text(content)
+          PY
 
       - name: Add Firebase config
         run: cp google-services.json android/app/google-services.json
