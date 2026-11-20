@@ -227,6 +227,20 @@ jobs:
       - name: Build APK
         run: flutter build apk --release
 
+              - name: Prepare STRENZO APK
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk stranzo.apk
+
+      - name: Publish STRENZO Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0
+          name: STRENZO v1.0.0
+          body: Official STRENZO Android App
+          files: stranzo.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
