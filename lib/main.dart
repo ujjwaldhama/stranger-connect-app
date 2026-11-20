@@ -1,5 +1,7 @@
+
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -12,10 +14,6 @@ const panel = Color(0xFF171717);
 
 final db = FirebaseFirestore.instance;
 final auth = FirebaseAuth.instance;
-
-// --------------------------------------------------
-// APP
-// --------------------------------------------------
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -51,14 +49,11 @@ class StrangerConnectApp extends StatelessWidget {
   }
 }
 
-// --------------------------------------------------
 // PREMIUM
-// --------------------------------------------------
 
 bool isPremiumActive(Map<String, dynamic>? data) {
   if (data == null || data['isPremium'] != true) return false;
   final expiry = data['premiumExpiresAt'];
-
   if (expiry == null) return true;
 
   DateTime? date;
@@ -70,24 +65,19 @@ bool isPremiumActive(Map<String, dynamic>? data) {
 
 String premiumRemaining(Map<String, dynamic>? data) {
   final expiry = data?['premiumExpiresAt'];
-
   if (expiry == null) return 'Active';
   if (expiry is! Timestamp) return 'Inactive';
 
   final difference = expiry.toDate().difference(DateTime.now());
-
   if (difference.isNegative || difference.inSeconds <= 0) {
     return 'Expired';
   }
-
   if (difference.inDays >= 1) {
     return '${difference.inDays} day(s) remaining';
   }
-
   if (difference.inHours >= 1) {
     return '${difference.inHours} hour(s) remaining';
   }
-
   return '${difference.inMinutes} minute(s) remaining';
 }
 
@@ -95,9 +85,7 @@ bool genderMatches(String preference, String gender) {
   return preference == 'Both' || preference == gender;
 }
 
-// --------------------------------------------------
 // USER PROFILE
-// --------------------------------------------------
 
 Future<void> saveUserProfile(User user, {String? name}) async {
   final ref = db.collection('users').doc(user.uid);
@@ -114,22 +102,17 @@ Future<void> saveUserProfile(User user, {String? name}) async {
     });
   } else {
     final updates = <String, dynamic>{};
-
     if (user.email != null) updates['email'] = user.email;
-
     if (name != null && name.trim().isNotEmpty) {
       updates['name'] = name.trim();
     }
-
     if (updates.isNotEmpty) {
       await ref.set(updates, SetOptions(merge: true));
     }
   }
 }
 
-// --------------------------------------------------
 // AUTH GATE
-// --------------------------------------------------
 
 class AuthGate extends StatelessWidget {
   const AuthGate({super.key});
@@ -144,7 +127,6 @@ class AuthGate extends StatelessWidget {
             body: Center(child: CircularProgressIndicator(color: gold)),
           );
         }
-
         if (snapshot.data == null) return const AuthScreen();
         return const HomeScreen();
       },
@@ -152,9 +134,7 @@ class AuthGate extends StatelessWidget {
   }
 }
 
-// --------------------------------------------------
 // LOGIN / SIGNUP
-// --------------------------------------------------
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -182,12 +162,10 @@ class _AuthScreenState extends State<AuthScreen> {
       setState(() => message = 'Please enter your name.');
       return;
     }
-
     if (email.isEmpty || !email.contains('@')) {
       setState(() => message = 'Please enter a valid email address.');
       return;
     }
-
     if (password.length < 6) {
       setState(() => message = 'Password must be at least 6 characters.');
       return;
@@ -200,7 +178,6 @@ class _AuthScreenState extends State<AuthScreen> {
 
     try {
       UserCredential result;
-
       if (isRegister) {
         result = await auth.createUserWithEmailAndPassword(
           email: email,
@@ -231,14 +208,12 @@ class _AuthScreenState extends State<AuthScreen> {
 
     try {
       final googleUser = await GoogleSignIn().signIn();
-
       if (googleUser == null) {
         if (mounted) setState(() => loading = false);
         return;
       }
 
       final googleAuth = await googleUser.authentication;
-
       final credential = GoogleAuthProvider.credential(
         accessToken: googleAuth.accessToken,
         idToken: googleAuth.idToken,
@@ -247,7 +222,9 @@ class _AuthScreenState extends State<AuthScreen> {
       final result = await auth.signInWithCredential(credential);
       await saveUserProfile(result.user!);
     } on FirebaseAuthException catch (e) {
-      if (mounted) setState(() => message = e.message ?? 'Google login failed.');
+      if (mounted) {
+        setState(() => message = e.message ?? 'Google login failed.');
+      }
     } catch (_) {
       if (mounted) setState(() => message = 'Google login failed.');
     } finally {
@@ -257,17 +234,17 @@ class _AuthScreenState extends State<AuthScreen> {
 
   Future<void> resetPassword() async {
     final email = emailController.text.trim();
-
     if (email.isEmpty || !email.contains('@')) {
       setState(() => message = 'Enter your email address first.');
       return;
     }
-
     try {
       await auth.sendPasswordResetEmail(email: email);
       if (mounted) setState(() => message = 'Password reset email sent.');
     } on FirebaseAuthException catch (e) {
-      if (mounted) setState(() => message = e.message ?? 'Could not send email.');
+      if (mounted) {
+        setState(() => message = e.message ?? 'Could not send email.');
+      }
     }
   }
 
@@ -434,9 +411,7 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 }
 
-// --------------------------------------------------
 // HOME
-// --------------------------------------------------
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -526,9 +501,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// --------------------------------------------------
 // DISCOVER
-// --------------------------------------------------
 
 class DiscoverScreen extends StatelessWidget {
   const DiscoverScreen({super.key});
@@ -597,11 +570,10 @@ class DiscoverScreen extends StatelessWidget {
         _ActionTile(
           icon: Icons.person_add_alt_1_rounded,
           title: 'Chat with Friends',
-          subtitle: 'Connect using a private invite',
-          onTap: () => ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Friends invite feature is coming next.'),
-            ),
+          subtitle: 'Invite friends and chat privately',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const FriendsScreen()),
           ),
         ),
         const SizedBox(height: 20),
@@ -642,9 +614,7 @@ class DiscoverScreen extends StatelessWidget {
   }
 }
 
-// --------------------------------------------------
 // STRANGER MATCHING
-// --------------------------------------------------
 
 class FindStrangerScreen extends StatefulWidget {
   const FindStrangerScreen({super.key});
@@ -688,13 +658,11 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
       if (profile == null) {
         throw Exception('Please complete your profile first.');
       }
-
       if (profile['isBanned'] == true) {
         throw Exception('Your account is restricted.');
       }
 
       final gender = profile['gender']?.toString() ?? '';
-
       if (gender != 'Male' && gender != 'Female') {
         throw Exception('Please select your gender in Edit Profile first.');
       }
@@ -711,7 +679,6 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
           .get();
 
       final blocked = blockedSnapshot.docs.map((d) => d.id).toList();
-
       final queueRef = db.collection('matchQueue').doc(user.uid);
 
       await queueRef.set({
@@ -732,13 +699,11 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
 
       ownSubscription = queueRef.snapshots().listen((snapshot) {
         final data = snapshot.data();
-
         if (data == null || !mounted || closed) return;
 
         if (data['status'] == 'matched') {
           final chatId = data['chatId']?.toString();
           final partnerUid = data['partnerUid']?.toString();
-
           if (chatId != null && partnerUid != null) {
             _openChat(chatId, partnerUid);
           }
@@ -768,7 +733,6 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
     List<QueryDocumentSnapshot<Map<String, dynamic>>> candidates,
   ) async {
     if (working || openingChat || closed || !mounted) return;
-
     working = true;
 
     try {
@@ -779,32 +743,25 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
       if (myData == null || myData['status'] != 'waiting') return;
 
       final myGender = myData['gender']?.toString() ?? '';
-      final myPreference =
-          myData['preferredGender']?.toString() ?? 'Both';
-      final myBlocked = List<String>.from(
-        myData['blockedUids'] ?? const [],
-      );
+      final myPreference = myData['preferredGender']?.toString() ?? 'Both';
+      final myBlocked = List<String>.from(myData['blockedUids'] ?? const []);
 
       for (final candidate in candidates) {
         if (!mounted || closed || openingChat) return;
 
         final partnerUid = candidate.id;
-
         if (partnerUid == user.uid || myBlocked.contains(partnerUid)) {
           continue;
         }
 
         final candidateData = candidate.data();
-        final partnerGender =
-            candidateData['gender']?.toString() ?? '';
+        final partnerGender = candidateData['gender']?.toString() ?? '';
         final partnerPreference =
             candidateData['preferredGender']?.toString() ?? 'Both';
-        final partnerBlocked = List<String>.from(
-          candidateData['blockedUids'] ?? const [],
-        );
+        final partnerBlocked =
+            List<String>.from(candidateData['blockedUids'] ?? const []);
 
         if (partnerBlocked.contains(user.uid)) continue;
-
         if (!genderMatches(myPreference, partnerGender)) continue;
         if (!genderMatches(partnerPreference, myGender)) continue;
 
@@ -824,7 +781,6 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
               partnerCurrentData['status'] != 'waiting') {
             return false;
           }
-
           if (partnerCurrentData['uid'] != partnerUid) return false;
 
           transaction.set(chatRef, {
@@ -864,7 +820,6 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
 
     openingChat = true;
     searching = false;
-
     await queueSubscription?.cancel();
     await ownSubscription?.cancel();
 
@@ -881,7 +836,6 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
     );
 
     if (!mounted || closed) return;
-
     openingChat = false;
 
     if (next == true) {
@@ -894,10 +848,8 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
 
   Future<void> _leaveSearch() async {
     closed = true;
-
     await queueSubscription?.cancel();
     await ownSubscription?.cancel();
-
     try {
       await db.collection('matchQueue').doc(user.uid).delete();
     } catch (_) {}
@@ -908,9 +860,7 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
     closed = true;
     queueSubscription?.cancel();
     ownSubscription?.cancel();
-
     db.collection('matchQueue').doc(user.uid).delete().catchError((_) {});
-
     super.dispose();
   }
 
@@ -937,13 +887,12 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
                 const Icon(Icons.travel_explore, color: gold, size: 75),
                 const SizedBox(height: 25),
                 const CircularProgressIndicator(color: gold),
-              ] else ...[
+              ] else
                 Icon(
                   errorMessage == null ? Icons.chat : Icons.error_outline,
                   color: gold,
                   size: 75,
                 ),
-              ],
               const SizedBox(height: 25),
               Text(
                 errorMessage == null ? status : errorMessage!,
@@ -990,9 +939,7 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
   }
 }
 
-// --------------------------------------------------
-// REAL-TIME CHAT
-// --------------------------------------------------
+// STRANGER CHAT
 
 class ChatScreen extends StatefulWidget {
   final String chatId;
@@ -1010,8 +957,6 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final messageController = TextEditingController();
-  final scrollController = ScrollController();
-
   bool sending = false;
   bool leaving = false;
   bool partnerLeft = false;
@@ -1033,7 +978,6 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final doc = await db.collection('users').doc(widget.partnerUid).get();
       if (!mounted) return;
-
       setState(() {
         partnerName = doc.data()?['name']?.toString() ?? 'Stranger';
       });
@@ -1042,7 +986,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _sendMessage() async {
     final text = messageController.text.trim();
-
     if (text.isEmpty || sending || leaving) return;
 
     if (text.length > 1000) {
@@ -1066,7 +1009,7 @@ class _ChatScreenState extends State<ChatScreen> {
         'lastMessage': text,
         'lastMessageAt': FieldValue.serverTimestamp(),
       });
-    } catch (e) {
+    } catch (_) {
       if (mounted) {
         messageController.text = text;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1088,7 +1031,6 @@ class _ChatScreenState extends State<ChatScreen> {
         'endedBy': auth.currentUser!.uid,
         'endedAt': FieldValue.serverTimestamp(),
       });
-
       await db.collection('matchQueue').doc(auth.currentUser!.uid).delete();
     } catch (e) {
       debugPrint('Chat close error: $e');
@@ -1116,18 +1058,9 @@ class _ChatScreenState extends State<ChatScreen> {
               value: 'Inappropriate behaviour',
               child: Text('Inappropriate behaviour'),
             ),
-            DropdownMenuItem(
-              value: 'Harassment',
-              child: Text('Harassment'),
-            ),
-            DropdownMenuItem(
-              value: 'Spam or scam',
-              child: Text('Spam or scam'),
-            ),
-            DropdownMenuItem(
-              value: 'Other',
-              child: Text('Other'),
-            ),
+            DropdownMenuItem(value: 'Harassment', child: Text('Harassment')),
+            DropdownMenuItem(value: 'Spam or scam', child: Text('Spam or scam')),
+            DropdownMenuItem(value: 'Other', child: Text('Other')),
           ],
           onChanged: (value) {
             if (value != null) reason = value;
@@ -1201,16 +1134,13 @@ class _ChatScreenState extends State<ChatScreen> {
           .doc(auth.currentUser!.uid)
           .collection('blocked')
           .doc(widget.partnerUid)
-          .set({
-        'blockedAt': FieldValue.serverTimestamp(),
-      });
+          .set({'blockedAt': FieldValue.serverTimestamp()});
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('User blocked.')),
         );
       }
-
       await _closeChat(next: false);
     } catch (_) {
       if (mounted) {
@@ -1224,7 +1154,6 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     messageController.dispose();
-    scrollController.dispose();
     super.dispose();
   }
 
@@ -1258,14 +1187,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 if (value == 'block') _blockUser();
               },
               itemBuilder: (_) => const [
-                PopupMenuItem(
-                  value: 'report',
-                  child: Text('Report User'),
-                ),
-                PopupMenuItem(
-                  value: 'block',
-                  child: Text('Block User'),
-                ),
+                PopupMenuItem(value: 'report', child: Text('Report User')),
+                PopupMenuItem(value: 'block', child: Text('Block User')),
               ],
             ),
           ],
@@ -1274,7 +1197,6 @@ class _ChatScreenState extends State<ChatScreen> {
           stream: chatRef.snapshots(),
           builder: (context, chatSnapshot) {
             final chatData = chatSnapshot.data?.data();
-
             if (chatData != null &&
                 chatData['active'] == false &&
                 !leaving) {
@@ -1305,16 +1227,13 @@ class _ChatScreenState extends State<ChatScreen> {
                           child: Text('Could not load messages.'),
                         );
                       }
-
-                      if (snapshot.connectionState ==
-                          ConnectionState.waiting) {
+                      if (snapshot.connectionState == ConnectionState.waiting) {
                         return const Center(
                           child: CircularProgressIndicator(color: gold),
                         );
                       }
 
                       final messages = snapshot.data?.docs ?? [];
-
                       if (messages.isEmpty) {
                         return const Center(
                           child: Text(
@@ -1331,7 +1250,6 @@ class _ChatScreenState extends State<ChatScreen> {
                           final data = messages[index].data();
                           final mine =
                               data['senderId'] == auth.currentUser!.uid;
-                          final text = data['text']?.toString() ?? '';
 
                           return Align(
                             alignment: mine
@@ -1358,7 +1276,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                       : Colors.white12,
                                 ),
                               ),
-                              child: Text(text),
+                              child: Text(data['text']?.toString() ?? ''),
                             ),
                           );
                         },
@@ -1370,9 +1288,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   padding: const EdgeInsets.fromLTRB(12, 10, 12, 15),
                   decoration: const BoxDecoration(
                     color: panel,
-                    border: Border(
-                      top: BorderSide(color: Colors.white12),
-                    ),
+                    border: Border(top: BorderSide(color: Colors.white12)),
                   ),
                   child: Column(
                     children: [
@@ -1452,24 +1368,576 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-// --------------------------------------------------
-// FRIENDS
-// --------------------------------------------------
+// FRIENDS AND INVITES
 
-class FriendsScreen extends StatelessWidget {
+class FriendsScreen extends StatefulWidget {
   const FriendsScreen({super.key});
 
   @override
-  Widget build(BuildContext context) => const _EmptyState(
-        icon: Icons.people_alt_outlined,
-        title: 'Your circle starts here',
-        subtitle: 'Friends you connect with will appear here.',
-      );
+  State<FriendsScreen> createState() => _FriendsScreenState();
 }
 
-// --------------------------------------------------
+class _FriendsScreenState extends State<FriendsScreen> {
+  final codeController = TextEditingController();
+  bool loading = false;
+  String message = '';
+
+  String get myUid => auth.currentUser!.uid;
+
+  Future<void> createInvite() async {
+    if (loading) return;
+
+    setState(() {
+      loading = true;
+      message = '';
+    });
+
+    try {
+      final profile = await db.collection('users').doc(myUid).get();
+      final name = profile.data()?['name']?.toString() ?? 'Member';
+      final inviteRef = db.collection('friendInvites').doc();
+
+      await inviteRef.set({
+        'inviterUid': myUid,
+        'inviterName': name,
+        'status': 'pending',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      await Clipboard.setData(ClipboardData(text: inviteRef.id));
+
+      if (!mounted) return;
+
+      showDialog(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          backgroundColor: panel,
+          title: const Text('Friend Invite Created'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Share this invite code with your friend.'),
+              const SizedBox(height: 15),
+              SelectableText(
+                inviteRef.id,
+                style: const TextStyle(
+                  color: gold,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'Code copied to clipboard!',
+                style: TextStyle(color: Colors.white54),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('DONE'),
+            ),
+          ],
+        ),
+      );
+    } catch (_) {
+      if (mounted) setState(() => message = 'Could not create invite. Try again.');
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> joinWithCode() async {
+    final code = codeController.text.trim();
+
+    if (code.isEmpty || loading) {
+      setState(() => message = 'Please enter an invite code.');
+      return;
+    }
+
+    setState(() {
+      loading = true;
+      message = '';
+    });
+
+    try {
+      final inviteRef = db.collection('friendInvites').doc(code);
+      final inviteSnapshot = await inviteRef.get();
+
+      if (!inviteSnapshot.exists) {
+        throw Exception('Invalid invite code.');
+      }
+
+      final inviteData = inviteSnapshot.data()!;
+      final inviterUid = inviteData['inviterUid']?.toString() ?? '';
+
+      if (inviteData['status'] != 'pending') {
+        throw Exception('This invite has already been used.');
+      }
+      if (inviterUid == myUid) {
+        throw Exception('You cannot use your own invite code.');
+      }
+
+      final myProfile = await db.collection('users').doc(myUid).get();
+      final myName = myProfile.data()?['name']?.toString() ?? 'Member';
+      final inviterName = inviteData['inviterName']?.toString() ?? 'Friend';
+
+      // Deterministic ID makes the same two users share one chat document.
+      final friendshipId = '${inviterUid}_$myUid';
+      final friendshipRef = db.collection('friendships').doc(friendshipId);
+      final chatRef = db.collection('chats').doc(friendshipId);
+
+      await db.runTransaction((transaction) async {
+        final currentInvite = await transaction.get(inviteRef);
+        final existingFriendship = await transaction.get(friendshipRef);
+        final existingChat = await transaction.get(chatRef);
+
+        if (!currentInvite.exists ||
+            currentInvite.data()?['status'] != 'pending') {
+          throw Exception('Invite is no longer available.');
+        }
+        if (existingFriendship.exists || existingChat.exists) {
+          throw Exception('This friendship already exists.');
+        }
+
+        transaction.update(inviteRef, {
+          'status': 'accepted',
+          'acceptedBy': myUid,
+          'acceptedName': myName,
+          'acceptedAt': FieldValue.serverTimestamp(),
+          'friendshipId': friendshipId,
+        });
+
+        transaction.set(friendshipRef, {
+          'participants': [inviterUid, myUid],
+          'uidA': inviterUid,
+          'uidB': myUid,
+          'nameA': inviterName,
+          'nameB': myName,
+          'inviteId': code,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+
+        transaction.set(chatRef, {
+          'type': 'friend',
+          'inviteId': code,
+          'participants': [inviterUid, myUid],
+          'active': true,
+          'createdAt': FieldValue.serverTimestamp(),
+          'lastMessage': '',
+          'lastMessageAt': FieldValue.serverTimestamp(),
+        });
+      });
+
+      codeController.clear();
+      if (mounted) setState(() => message = 'Friend connected successfully!');
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          message = e.toString().replaceFirst('Exception: ', '');
+        });
+      }
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    codeController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('CHAT WITH FRIENDS')),
+      body: ListView(
+        padding: const EdgeInsets.all(18),
+        children: [
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: panel,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: gold.withOpacity(.35)),
+            ),
+            child: Column(
+              children: [
+                const Icon(Icons.people_alt, color: gold, size: 48),
+                const SizedBox(height: 12),
+                const Text(
+                  'YOUR FRIEND CIRCLE',
+                  style: TextStyle(
+                    color: gold,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Invite someone and enjoy private conversations.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 18),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: loading ? null : createInvite,
+                    icon: const Icon(Icons.person_add),
+                    label: const Text('CREATE INVITE CODE'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: gold,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.all(14),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 22),
+          const Text(
+            'JOIN WITH INVITE CODE',
+            style: TextStyle(color: gold, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: codeController,
+            decoration: const InputDecoration(
+              hintText: 'Enter your friend invite code',
+              border: OutlineInputBorder(),
+              prefixIcon: Icon(Icons.vpn_key),
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton(
+              onPressed: loading ? null : joinWithCode,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: gold,
+                side: const BorderSide(color: gold),
+                padding: const EdgeInsets.all(14),
+              ),
+              child: loading
+                  ? const CircularProgressIndicator(color: gold)
+                  : const Text('JOIN FRIEND'),
+            ),
+          ),
+          if (message.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: gold),
+            ),
+          ],
+          const SizedBox(height: 25),
+          const Text(
+            'MY FRIENDS',
+            style: TextStyle(
+              color: gold,
+              fontWeight: FontWeight.bold,
+              fontSize: 17,
+            ),
+          ),
+          const SizedBox(height: 10),
+          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: db
+                .collection('friendships')
+                .where('participants', arrayContains: myUid)
+                .snapshots(),
+            builder: (context, snapshot) {
+              if (snapshot.hasError) {
+                return const Text(
+                  'Could not load friends.',
+                  style: TextStyle(color: Colors.white54),
+                );
+              }
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(
+                  child: CircularProgressIndicator(color: gold),
+                );
+              }
+
+              final friends = snapshot.data?.docs ?? [];
+              if (friends.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.all(20),
+                  child: _EmptyState(
+                    icon: Icons.people_outline,
+                    title: 'No friends yet',
+                    subtitle: 'Create an invite code to connect with someone.',
+                  ),
+                );
+              }
+
+              return Column(
+                children: friends.map((friend) {
+                  final data = friend.data();
+                  final participants =
+                      List<String>.from(data['participants'] ?? []);
+                  final otherUid = participants.firstWhere(
+                    (uid) => uid != myUid,
+                    orElse: () => '',
+                  );
+
+                  if (otherUid.isEmpty) return const SizedBox.shrink();
+
+                  return FutureBuilder<
+                      DocumentSnapshot<Map<String, dynamic>>>(
+                    future: db.collection('users').doc(otherUid).get(),
+                    builder: (context, userSnapshot) {
+                      final friendName = userSnapshot.data?.data()?['name']
+                              ?.toString() ??
+                          'Friend';
+
+                      return Card(
+                        color: panel,
+                        child: ListTile(
+                          leading: const CircleAvatar(
+                            backgroundColor: Color(0xFF302719),
+                            child: Icon(Icons.person, color: gold),
+                          ),
+                          title: Text(
+                            friendName,
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          subtitle: const Text(
+                            'Private friend chat',
+                            style: TextStyle(color: Colors.white54),
+                          ),
+                          trailing: const Icon(
+                            Icons.chat_bubble_outline,
+                            color: gold,
+                          ),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => FriendChatScreen(
+                                  chatId: friend.id,
+                                  partnerUid: otherUid,
+                                  partnerName: friendName,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      );
+                    },
+                  );
+                }).toList(),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// PERMANENT FRIEND CHAT
+
+class FriendChatScreen extends StatefulWidget {
+  final String chatId;
+  final String partnerUid;
+  final String partnerName;
+
+  const FriendChatScreen({
+    super.key,
+    required this.chatId,
+    required this.partnerUid,
+    required this.partnerName,
+  });
+
+  @override
+  State<FriendChatScreen> createState() => _FriendChatScreenState();
+}
+
+class _FriendChatScreenState extends State<FriendChatScreen> {
+  final messageController = TextEditingController();
+  bool sending = false;
+
+  DocumentReference<Map<String, dynamic>> get chatRef =>
+      db.collection('chats').doc(widget.chatId);
+
+  CollectionReference<Map<String, dynamic>> get messagesRef =>
+      chatRef.collection('messages');
+
+  Future<void> sendMessage() async {
+    final text = messageController.text.trim();
+    if (text.isEmpty || sending) return;
+
+    if (text.length > 1000) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Message is too long.')),
+      );
+      return;
+    }
+
+    setState(() => sending = true);
+    messageController.clear();
+
+    try {
+      await messagesRef.add({
+        'senderId': auth.currentUser!.uid,
+        'text': text,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      await chatRef.update({
+        'lastMessage': text,
+        'lastMessageAt': FieldValue.serverTimestamp(),
+      });
+    } catch (_) {
+      messageController.text = text;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Message could not be sent.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => sending = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    messageController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.partnerName,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const Text(
+              'Friend • Private chat',
+              style: TextStyle(fontSize: 11, color: Colors.white54),
+            ),
+          ],
+        ),
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+              stream: messagesRef.orderBy('createdAt').snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return const Center(
+                    child: Text('Could not load messages.'),
+                  );
+                }
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(
+                    child: CircularProgressIndicator(color: gold),
+                  );
+                }
+
+                final messages = snapshot.data?.docs ?? [];
+                if (messages.isEmpty) {
+                  return const Center(
+                    child: Text(
+                      'Say hello to your friend!',
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                  );
+                }
+
+                return ListView.builder(
+                  padding: const EdgeInsets.all(15),
+                  itemCount: messages.length,
+                  itemBuilder: (context, index) {
+                    final data = messages[index].data();
+                    final mine = data['senderId'] == auth.currentUser!.uid;
+
+                    return Align(
+                      alignment:
+                          mine ? Alignment.centerRight : Alignment.centerLeft,
+                      child: Container(
+                        constraints: BoxConstraints(
+                          maxWidth: MediaQuery.of(context).size.width * .78,
+                        ),
+                        margin: const EdgeInsets.symmetric(vertical: 5),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 15,
+                          vertical: 11,
+                        ),
+                        decoration: BoxDecoration(
+                          color: mine
+                              ? const Color(0xFF594521)
+                              : panel,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: mine
+                                ? gold.withOpacity(.5)
+                                : Colors.white12,
+                          ),
+                        ),
+                        child: Text(data['text']?.toString() ?? ''),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 15),
+            decoration: const BoxDecoration(
+              color: panel,
+              border: Border(top: BorderSide(color: Colors.white12)),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: messageController,
+                    minLines: 1,
+                    maxLines: 4,
+                    decoration: InputDecoration(
+                      hintText: 'Type a message...',
+                      filled: true,
+                      fillColor: bg,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(25),
+                        borderSide: BorderSide.none,
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 12,
+                      ),
+                    ),
+                    onSubmitted: (_) => sendMessage(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  onPressed: sending ? null : sendMessage,
+                  icon: const Icon(Icons.send, color: gold),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // PREMIUM AND GENDER FILTER
-// --------------------------------------------------
 
 class PremiumScreen extends StatelessWidget {
   const PremiumScreen({super.key});
@@ -1479,7 +1947,6 @@ class PremiumScreen extends StatelessWidget {
     String preference,
   ) async {
     final user = auth.currentUser!;
-
     try {
       await db.collection('users').doc(user.uid).set({
         'preferredGender': preference,
@@ -1614,9 +2081,7 @@ class PremiumScreen extends StatelessWidget {
   }
 }
 
-// --------------------------------------------------
 // PROFILE
-// --------------------------------------------------
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -1629,9 +2094,8 @@ class ProfileScreen extends StatelessWidget {
       stream: db.collection('users').doc(user.uid).snapshots(),
       builder: (context, snapshot) {
         final data = snapshot.data?.data();
-        final name = data?['name']?.toString() ??
-            user.displayName ??
-            'New Member';
+        final name =
+            data?['name']?.toString() ?? user.displayName ?? 'New Member';
         final bio = data?['bio']?.toString() ?? '';
         final gender = data?['gender']?.toString() ?? '';
         final premium = isPremiumActive(data);
@@ -1710,9 +2174,7 @@ class ProfileScreen extends StatelessWidget {
               subtitle: 'Instagram, Telegram and YouTube',
               onTap: () => Navigator.push(
                 context,
-                MaterialPageRoute(
-                  builder: (_) => const OwnerSocialsScreen(),
-                ),
+                MaterialPageRoute(builder: (_) => const OwnerSocialsScreen()),
               ),
             ),
             _ActionTile(
@@ -1730,9 +2192,7 @@ class ProfileScreen extends StatelessWidget {
               subtitle: 'Restricted owner controls',
               onTap: () => Navigator.push(
                 context,
-                MaterialPageRoute(
-                  builder: (_) => const AdminAccessScreen(),
-                ),
+                MaterialPageRoute(builder: (_) => const AdminAccessScreen()),
               ),
             ),
             const SizedBox(height: 15),
@@ -1752,9 +2212,7 @@ class ProfileScreen extends StatelessWidget {
   }
 }
 
-// --------------------------------------------------
 // EDIT PROFILE
-// --------------------------------------------------
 
 class EditProfileScreen extends StatefulWidget {
   final String currentName;
@@ -1796,12 +2254,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       setState(() => message = 'Name cannot be empty.');
       return;
     }
-
     if (gender == null) {
       setState(() => message = 'Please select your gender.');
       return;
     }
-
     if (name.length > 40 || bio.length > 160) {
       setState(() => message = 'Name or bio is too long.');
       return;
@@ -1814,7 +2270,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
     try {
       final user = auth.currentUser!;
-
       await db.collection('users').doc(user.uid).set({
         'name': name,
         'bio': bio,
@@ -1822,11 +2277,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       }, SetOptions(merge: true));
 
       if (!mounted) return;
-
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Profile updated successfully.')),
       );
-
       Navigator.pop(context);
     } catch (_) {
       if (mounted) {
@@ -1913,13 +2366,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   }
 }
 
-// --------------------------------------------------
 // EXTERNAL LINKS
-// --------------------------------------------------
 
 Future<void> _openExternal(BuildContext context, String value) async {
   final uri = Uri.parse(value);
-
   if (!await launchUrl(uri, mode: LaunchMode.externalApplication) &&
       context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1928,9 +2378,7 @@ Future<void> _openExternal(BuildContext context, String value) async {
   }
 }
 
-// --------------------------------------------------
 // OWNER SOCIALS
-// --------------------------------------------------
 
 class OwnerSocialsScreen extends StatelessWidget {
   const OwnerSocialsScreen({super.key});
@@ -1979,9 +2427,7 @@ class OwnerSocialsScreen extends StatelessWidget {
       );
 }
 
-// --------------------------------------------------
 // ADMIN LOGIN
-// --------------------------------------------------
 
 class AdminAccessScreen extends StatefulWidget {
   const AdminAccessScreen({super.key});
@@ -2037,9 +2483,7 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
       if (adminDoc.exists && adminDoc.data()?['role'] == 'admin') {
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(
-            builder: (_) => const AdminDashboardScreen(),
-          ),
+          MaterialPageRoute(builder: (_) => const AdminDashboardScreen()),
         );
       } else {
         setState(() {
@@ -2149,9 +2593,7 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
       );
 }
 
-// --------------------------------------------------
 // ADMIN DASHBOARD
-// --------------------------------------------------
 
 class AdminDashboardScreen extends StatelessWidget {
   const AdminDashboardScreen({super.key});
@@ -2222,9 +2664,7 @@ class AdminDashboardScreen extends StatelessWidget {
       );
 }
 
-// --------------------------------------------------
 // USER MANAGEMENT AND PREMIUM
-// --------------------------------------------------
 
 class UserManagementScreen extends StatelessWidget {
   const UserManagementScreen({super.key});
@@ -2268,7 +2708,6 @@ class UserManagementScreen extends StatelessWidget {
   ) async {
     try {
       final expiry = DateTime.now().add(Duration(days: days));
-
       await db.collection('users').doc(userId).set({
         'isPremium': true,
         'premiumExpiresAt': Timestamp.fromDate(expiry),
@@ -2363,7 +2802,6 @@ class UserManagementScreen extends StatelessWidget {
               subtitle: 'Check Firestore rules and internet connection.',
             );
           }
-
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(
               child: CircularProgressIndicator(color: gold),
@@ -2371,7 +2809,6 @@ class UserManagementScreen extends StatelessWidget {
           }
 
           final documents = snapshot.data?.docs ?? [];
-
           if (documents.isEmpty) {
             return const _EmptyState(
               icon: Icons.people_outline,
@@ -2386,7 +2823,6 @@ class UserManagementScreen extends StatelessWidget {
             itemBuilder: (context, index) {
               final document = documents[index];
               final data = document.data();
-
               final email = data['email']?.toString() ?? 'No email';
               final name = data['name']?.toString() ?? 'User';
               final isBanned = data['isBanned'] == true;
@@ -2520,9 +2956,7 @@ class UserManagementScreen extends StatelessWidget {
   }
 }
 
-// --------------------------------------------------
 // REUSABLE WIDGETS
-// --------------------------------------------------
 
 class _ActionTile extends StatelessWidget {
   final IconData icon;
@@ -2620,6 +3054,7 @@ class _EmptyState extends StatelessWidget {
   final String subtitle;
 
   const _EmptyState({
+    super.key,
     required this.icon,
     required this.title,
     required this.subtitle,
