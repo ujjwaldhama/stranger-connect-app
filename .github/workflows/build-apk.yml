@@ -1,5 +1,5 @@
 
-name: Build Stranger Connect APK
+name: Build STRENZO APK
 
 on:
   workflow_dispatch:
@@ -194,6 +194,9 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Generate STRENZO App Icon
+        run: dart run flutter_launcher_icons
+
       - name: Verify signing configuration
         run: |
           cd android
@@ -206,5 +209,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Stranger-Connect-APK
+          name: STRENZO-APK
           path: build/app/outputs/flutter-apk/app-release.apk
