@@ -8,9 +8,9 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
-const gold = Color(0xFFD6AD55);
-const bg = Color(0xFF090909);
-const panel = Color(0xFF171717);
+const gold = Color(0xFFB44CFF);
+const bg = Color(0xFF050008);
+const panel = Color(0xFF160B20);
 
 final db = FirebaseFirestore.instance;
 final auth = FirebaseAuth.instance;
