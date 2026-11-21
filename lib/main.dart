@@ -1,5 +1,7 @@
 
 import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -7,17 +9,30 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:record/record.dart';
+import 'package:audioplayers/audioplayers.dart';
 
 const gold = Color(0xFFB44CFF);
 const bg = Color(0xFF050008);
 const panel = Color(0xFF160B20);
 
+const supabaseUrl = 'https://cgimxrrxjeyamckxweta.supabase.co';
+const supabaseKey = 'sb_publishable_0b8iCEOvOzpUuC-TtsKt7w_nSOFYIOZ';
+const mediaBucket = 'chat-media';
+
 final db = FirebaseFirestore.instance;
 final auth = FirebaseAuth.instance;
+final supabase = Supabase.instance.client;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
+  await Supabase.initialize(
+    url: supabaseUrl,
+    anonKey: supabaseKey,
+  );
   runApp(const StrangerConnectApp());
 }
 
@@ -28,7 +43,7 @@ class StrangerConnectApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Stranger Connect',
+      title: 'STRENZO',
       theme: ThemeData(
         brightness: Brightness.dark,
         scaffoldBackgroundColor: bg,
@@ -49,17 +64,15 @@ class StrangerConnectApp extends StatelessWidget {
   }
 }
 
-// PREMIUM
+// PREMIUM HELPERS
 
 bool isPremiumActive(Map<String, dynamic>? data) {
   if (data == null || data['isPremium'] != true) return false;
   final expiry = data['premiumExpiresAt'];
   if (expiry == null) return true;
-
   DateTime? date;
   if (expiry is Timestamp) date = expiry.toDate();
   if (expiry is DateTime) date = expiry;
-
   return date != null && DateTime.now().isBefore(date);
 }
 
@@ -67,31 +80,22 @@ String premiumRemaining(Map<String, dynamic>? data) {
   final expiry = data?['premiumExpiresAt'];
   if (expiry == null) return 'Active';
   if (expiry is! Timestamp) return 'Inactive';
-
-  final difference = expiry.toDate().difference(DateTime.now());
-  if (difference.isNegative || difference.inSeconds <= 0) {
-    return 'Expired';
-  }
-  if (difference.inDays >= 1) {
-    return '${difference.inDays} day(s) remaining';
-  }
-  if (difference.inHours >= 1) {
-    return '${difference.inHours} hour(s) remaining';
-  }
-  return '${difference.inMinutes} minute(s) remaining';
+  final d = expiry.toDate().difference(DateTime.now());
+  if (d.isNegative || d.inSeconds <= 0) return 'Expired';
+  if (d.inDays >= 1) return '${d.inDays} day(s) remaining';
+  if (d.inHours >= 1) return '${d.inHours} hour(s) remaining';
+  return '${d.inMinutes} minute(s) remaining';
 }
 
-bool genderMatches(String preference, String gender) {
-  return preference == 'Both' || preference == gender;
-}
+bool genderMatches(String preference, String gender) =>
+    preference == 'Both' || preference == gender;
 
-// USER PROFILE
+// PROFILE HELPER
 
 Future<void> saveUserProfile(User user, {String? name}) async {
   final ref = db.collection('users').doc(user.uid);
-  final document = await ref.get();
-
-  if (!document.exists) {
+  final doc = await ref.get();
+  if (!doc.exists) {
     await ref.set({
       'name': name?.trim().isNotEmpty == true
           ? name!.trim()
@@ -127,8 +131,9 @@ class AuthGate extends StatelessWidget {
             body: Center(child: CircularProgressIndicator(color: gold)),
           );
         }
-        if (snapshot.data == null) return const AuthScreen();
-        return const HomeScreen();
+        return snapshot.data == null
+            ? const AuthScreen()
+            : const HomeScreen();
       },
     );
   }
@@ -193,8 +198,8 @@ class _AuthScreenState extends State<AuthScreen> {
       }
     } on FirebaseAuthException catch (e) {
       if (mounted) setState(() => message = e.message ?? 'Login failed.');
-    } catch (_) {
-      if (mounted) setState(() => message = 'Something went wrong.');
+    } catch (e) {
+      if (mounted) setState(() => message = 'Something went wrong: $e');
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -205,20 +210,14 @@ class _AuthScreenState extends State<AuthScreen> {
       loading = true;
       message = '';
     });
-
     try {
       final googleUser = await GoogleSignIn().signIn();
-      if (googleUser == null) {
-        if (mounted) setState(() => loading = false);
-        return;
-      }
-
+      if (googleUser == null) return;
       final googleAuth = await googleUser.authentication;
       final credential = GoogleAuthProvider.credential(
         accessToken: googleAuth.accessToken,
         idToken: googleAuth.idToken,
       );
-
       final result = await auth.signInWithCredential(credential);
       await saveUserProfile(result.user!);
     } on FirebaseAuthException catch (e) {
@@ -242,9 +241,7 @@ class _AuthScreenState extends State<AuthScreen> {
       await auth.sendPasswordResetEmail(email: email);
       if (mounted) setState(() => message = 'Password reset email sent.');
     } on FirebaseAuthException catch (e) {
-      if (mounted) {
-        setState(() => message = e.message ?? 'Could not send email.');
-      }
+      if (mounted) setState(() => message = e.message ?? 'Could not send email.');
     }
   }
 
@@ -267,17 +264,17 @@ class _AuthScreenState extends State<AuthScreen> {
               const Icon(Icons.forum_rounded, color: gold, size: 65),
               const SizedBox(height: 12),
               const Text(
-                'STRANGER CONNECT',
+                'STRENZO',
                 style: TextStyle(
                   color: gold,
-                  fontSize: 22,
+                  fontSize: 25,
                   fontWeight: FontWeight.w900,
-                  letterSpacing: 1.2,
+                  letterSpacing: 2,
                 ),
               ),
               const SizedBox(height: 8),
               const Text(
-                'Meet someone new. Stay anonymous.',
+                'Meet. Connect. Chat.',
                 style: TextStyle(color: Colors.white54),
               ),
               const SizedBox(height: 35),
@@ -319,12 +316,11 @@ class _AuthScreenState extends State<AuthScreen> {
                   prefixIcon: const Icon(Icons.lock_outline),
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
-                    onPressed: () {
-                      setState(() => obscurePassword = !obscurePassword);
-                    },
-                    icon: Icon(
-                      obscurePassword ? Icons.visibility : Icons.visibility_off,
-                    ),
+                    onPressed: () =>
+                        setState(() => obscurePassword = !obscurePassword),
+                    icon: Icon(obscurePassword
+                        ? Icons.visibility
+                        : Icons.visibility_off),
                   ),
                 ),
               ),
@@ -439,11 +435,11 @@ class _HomeScreenState extends State<HomeScreen> {
             Icon(Icons.forum_rounded, color: gold),
             SizedBox(width: 9),
             Text(
-              'STRANGER CONNECT',
+              'STRENZO',
               style: TextStyle(
                 fontWeight: FontWeight.w900,
                 letterSpacing: 1.1,
-                fontSize: 15,
+                fontSize: 17,
               ),
             ),
           ],
@@ -506,19 +502,11 @@ class _HomeScreenState extends State<HomeScreen> {
 class DiscoverScreen extends StatelessWidget {
   const DiscoverScreen({super.key});
 
-  Future<void> _find(BuildContext context) async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const FindStrangerScreen()),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        const SizedBox(height: 8),
         Container(
           padding: const EdgeInsets.all(22),
           decoration: BoxDecoration(
@@ -565,7 +553,10 @@ class DiscoverScreen extends StatelessWidget {
           icon: Icons.shuffle_rounded,
           title: 'Find Stranger',
           subtitle: 'Get matched for a private chat',
-          onTap: () => _find(context),
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const FindStrangerScreen()),
+          ),
         ),
         _ActionTile(
           icon: Icons.person_add_alt_1_rounded,
@@ -643,7 +634,6 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
 
   Future<void> _startSearch() async {
     if (closed || !mounted) return;
-
     setState(() {
       searching = true;
       openingChat = false;
@@ -654,13 +644,8 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
     try {
       final profileDoc = await db.collection('users').doc(user.uid).get();
       final profile = profileDoc.data();
-
-      if (profile == null) {
-        throw Exception('Please complete your profile first.');
-      }
-      if (profile['isBanned'] == true) {
-        throw Exception('Your account is restricted.');
-      }
+      if (profile == null) throw Exception('Please complete your profile first.');
+      if (profile['isBanned'] == true) throw Exception('Your account is restricted.');
 
       final gender = profile['gender']?.toString() ?? '';
       if (gender != 'Male' && gender != 'Female') {
@@ -677,10 +662,9 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
           .doc(user.uid)
           .collection('blocked')
           .get();
-
       final blocked = blockedSnapshot.docs.map((d) => d.id).toList();
-      final queueRef = db.collection('matchQueue').doc(user.uid);
 
+      final queueRef = db.collection('matchQueue').doc(user.uid);
       await queueRef.set({
         'uid': user.uid,
         'gender': gender,
@@ -693,14 +677,12 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
       });
 
       if (!mounted || closed) return;
-
-      ownSubscription?.cancel();
-      queueSubscription?.cancel();
+      await ownSubscription?.cancel();
+      await queueSubscription?.cancel();
 
       ownSubscription = queueRef.snapshots().listen((snapshot) {
         final data = snapshot.data();
         if (data == null || !mounted || closed) return;
-
         if (data['status'] == 'matched') {
           final chatId = data['chatId']?.toString();
           final partnerUid = data['partnerUid']?.toString();
@@ -714,9 +696,7 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
           .collection('matchQueue')
           .where('status', isEqualTo: 'waiting')
           .snapshots()
-          .listen((snapshot) {
-        _tryMatch(snapshot.docs);
-      });
+          .listen((snapshot) => _tryMatch(snapshot.docs));
 
       setState(() => status = 'Searching for an available stranger...');
     } catch (e) {
@@ -734,12 +714,10 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
   ) async {
     if (working || openingChat || closed || !mounted) return;
     working = true;
-
     try {
       final myQueueRef = db.collection('matchQueue').doc(user.uid);
       final mySnapshot = await myQueueRef.get();
       final myData = mySnapshot.data();
-
       if (myData == null || myData['status'] != 'waiting') return;
 
       final myGender = myData['gender']?.toString() ?? '';
@@ -748,11 +726,8 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
 
       for (final candidate in candidates) {
         if (!mounted || closed || openingChat) return;
-
         final partnerUid = candidate.id;
-        if (partnerUid == user.uid || myBlocked.contains(partnerUid)) {
-          continue;
-        }
+        if (partnerUid == user.uid || myBlocked.contains(partnerUid)) continue;
 
         final candidateData = candidate.data();
         final partnerGender = candidateData['gender']?.toString() ?? '';
@@ -771,17 +746,13 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
         final matched = await db.runTransaction<bool>((transaction) async {
           final myCurrent = await transaction.get(myQueueRef);
           final partnerCurrent = await transaction.get(partnerRef);
-
           if (!myCurrent.exists || !partnerCurrent.exists) return false;
 
-          final myCurrentData = myCurrent.data()!;
-          final partnerCurrentData = partnerCurrent.data()!;
-
-          if (myCurrentData['status'] != 'waiting' ||
-              partnerCurrentData['status'] != 'waiting') {
+          if (myCurrent.data()?['status'] != 'waiting' ||
+              partnerCurrent.data()?['status'] != 'waiting') {
             return false;
           }
-          if (partnerCurrentData['uid'] != partnerUid) return false;
+          if (partnerCurrent.data()?['uid'] != partnerUid) return false;
 
           transaction.set(chatRef, {
             'participants': [user.uid, partnerUid],
@@ -790,19 +761,16 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
             'lastMessage': '',
             'lastMessageAt': FieldValue.serverTimestamp(),
           });
-
           transaction.update(myQueueRef, {
             'status': 'matched',
             'chatId': chatRef.id,
             'partnerUid': partnerUid,
           });
-
           transaction.update(partnerRef, {
             'status': 'matched',
             'chatId': chatRef.id,
             'partnerUid': user.uid,
           });
-
           return true;
         });
 
@@ -817,27 +785,21 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
 
   Future<void> _openChat(String chatId, String partnerUid) async {
     if (openingChat || closed || !mounted) return;
-
     openingChat = true;
     searching = false;
     await queueSubscription?.cancel();
     await ownSubscription?.cancel();
-
     if (!mounted || closed) return;
 
     final next = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
-        builder: (_) => ChatScreen(
-          chatId: chatId,
-          partnerUid: partnerUid,
-        ),
+        builder: (_) => ChatScreen(chatId: chatId, partnerUid: partnerUid),
       ),
     );
 
     if (!mounted || closed) return;
     openingChat = false;
-
     if (next == true) {
       await _startSearch();
     } else {
@@ -895,7 +857,7 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
                 ),
               const SizedBox(height: 25),
               Text(
-                errorMessage == null ? status : errorMessage!,
+                errorMessage ?? status,
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                   color: gold,
@@ -939,6 +901,520 @@ class _FindStrangerScreenState extends State<FindStrangerScreen> {
   }
 }
 
+// CHAT MESSAGE BUBBLE - TEXT / IMAGE / VOICE
+
+class ChatMessageBubble extends StatelessWidget {
+  final Map<String, dynamic> data;
+  final bool mine;
+
+  const ChatMessageBubble({
+    super.key,
+    required this.data,
+    required this.mine,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final type = data['messageType']?.toString() ?? 'text';
+
+    return Align(
+      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * .78,
+        ),
+        margin: const EdgeInsets.symmetric(vertical: 5),
+        padding: const EdgeInsets.all(11),
+        decoration: BoxDecoration(
+          color: mine ? const Color(0xFF594521) : panel,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: mine ? gold.withOpacity(.5) : Colors.white12,
+          ),
+        ),
+        child: type == 'image'
+            ? ChatImage(data: data)
+            : type == 'audio'
+                ? ChatAudio(data: data)
+                : Text(data['text']?.toString() ?? ''),
+      ),
+    );
+  }
+}
+
+class ChatImage extends StatefulWidget {
+  final Map<String, dynamic> data;
+  const ChatImage({super.key, required this.data});
+
+  @override
+  State<ChatImage> createState() => _ChatImageState();
+}
+
+class _ChatImageState extends State<ChatImage> {
+  String? url;
+  bool failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    try {
+      final path = widget.data['mediaPath']?.toString() ?? '';
+      if (path.isEmpty) throw Exception('Missing image path');
+      final result = await supabase.storage
+          .from(mediaBucket)
+          .createSignedUrl(path, 60 * 60 * 24 * 7);
+      if (mounted) setState(() => url = result);
+    } catch (_) {
+      if (mounted) setState(() => failed = true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (failed) {
+      return const SizedBox(
+        width: 190,
+        child: Text('Image could not be loaded.',
+            style: TextStyle(color: Colors.white70)),
+      );
+    }
+    if (url == null) {
+      return const SizedBox(
+        width: 190,
+        height: 150,
+        child: Center(child: CircularProgressIndicator(color: gold)),
+      );
+    }
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => Scaffold(
+            backgroundColor: Colors.black,
+            appBar: AppBar(),
+            body: Center(
+              child: InteractiveViewer(
+                child: Image.network(url!, fit: BoxFit.contain),
+              ),
+            ),
+          ),
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Image.network(
+          url!,
+          width: 220,
+          height: 220,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) =>
+              const Text('Could not display image.'),
+        ),
+      ),
+    );
+  }
+}
+
+class ChatAudio extends StatefulWidget {
+  final Map<String, dynamic> data;
+  const ChatAudio({super.key, required this.data});
+
+  @override
+  State<ChatAudio> createState() => _ChatAudioState();
+}
+
+class _ChatAudioState extends State<ChatAudio> {
+  final player = AudioPlayer();
+  bool playing = false;
+  bool loading = false;
+  StreamSubscription<void>? completedSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    completedSubscription = player.onPlayerComplete.listen((_) {
+      if (mounted) setState(() => playing = false);
+    });
+  }
+
+  Future<void> toggle() async {
+    if (loading) return;
+    try {
+      if (playing) {
+        await player.pause();
+        if (mounted) setState(() => playing = false);
+        return;
+      }
+
+      setState(() => loading = true);
+      final path = widget.data['mediaPath']?.toString() ?? '';
+      if (path.isEmpty) throw Exception('Missing audio path');
+
+      final url = await supabase.storage
+          .from(mediaBucket)
+          .createSignedUrl(path, 60 * 60 * 24 * 7);
+
+      await player.play(UrlSource(url));
+      if (mounted) setState(() => playing = true);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Voice message could not be played.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    completedSubscription?.cancel();
+    player.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 190,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            onPressed: loading ? null : toggle,
+            icon: loading
+                ? const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                      color: gold,
+                      strokeWidth: 2,
+                    ),
+                  )
+                : Icon(
+                    playing ? Icons.pause_circle : Icons.play_circle,
+                    color: gold,
+                    size: 34,
+                  ),
+          ),
+          const Expanded(
+            child: Text(
+              'Voice message',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// SHARED CHAT COMPOSER
+// Used by both Stranger Chat and Friend Chat.
+
+class ChatComposer extends StatefulWidget {
+  final String chatId;
+  final bool disabled;
+
+  const ChatComposer({
+    super.key,
+    required this.chatId,
+    this.disabled = false,
+  });
+
+  @override
+  State<ChatComposer> createState() => _ChatComposerState();
+}
+
+class _ChatComposerState extends State<ChatComposer> {
+  final controller = TextEditingController();
+  final recorder = AudioRecorder();
+  bool sending = false;
+  bool recording = false;
+  bool recordingBusy = false;
+  String? recordingPath;
+
+  DocumentReference<Map<String, dynamic>> get chatRef =>
+      db.collection('chats').doc(widget.chatId);
+
+  CollectionReference<Map<String, dynamic>> get messagesRef =>
+      chatRef.collection('messages');
+
+  void showMessage(String value) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(value)),
+    );
+  }
+
+  Future<void> sendText() async {
+    final text = controller.text.trim();
+    if (text.isEmpty || sending || widget.disabled) return;
+    if (text.length > 1000) {
+      showMessage('Message is too long.');
+      return;
+    }
+
+    setState(() => sending = true);
+    controller.clear();
+
+    try {
+      await messagesRef.add({
+        'senderId': auth.currentUser!.uid,
+        'text': text,
+        'messageType': 'text',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      await chatRef.update({
+        'lastMessage': text,
+        'lastMessageAt': FieldValue.serverTimestamp(),
+      });
+    } catch (_) {
+      controller.text = text;
+      showMessage('Message could not be sent.');
+    } finally {
+      if (mounted) setState(() => sending = false);
+    }
+  }
+
+  Future<void> sendImage() async {
+    if (sending || widget.disabled) return;
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 80,
+        maxWidth: 1600,
+      );
+      if (picked == null) return;
+
+      setState(() => sending = true);
+      final bytes = await picked.readAsBytes();
+      final uid = auth.currentUser!.uid;
+      final path = 'images/$uid/${DateTime.now().microsecondsSinceEpoch}_${picked.name.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_')}';
+
+      await supabase.storage.from(mediaBucket).uploadBinary(
+        path,
+        bytes,
+        fileOptions: const FileOptions(
+          contentType: 'image/jpeg',
+          upsert: false,
+        ),
+      );
+
+      await messagesRef.add({
+        'senderId': uid,
+        'text': '',
+        'messageType': 'image',
+        'mediaPath': path,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      await chatRef.update({
+        'lastMessage': '📷 Image',
+        'lastMessageAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      showMessage('Image could not be sent. Check Storage settings.');
+      debugPrint('Image upload error: $e');
+    } finally {
+      if (mounted) setState(() => sending = false);
+    }
+  }
+
+  Future<void> startRecording() async {
+    if (recording || recordingBusy || sending || widget.disabled) return;
+    try {
+      final allowed = await recorder.hasPermission();
+      if (!allowed) {
+        showMessage('Microphone permission is required.');
+        return;
+      }
+
+      final path =
+          '${Directory.systemTemp.path}/voice_${DateTime.now().microsecondsSinceEpoch}.m4a';
+
+      await recorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          bitRate: 128000,
+          sampleRate: 44100,
+        ),
+        path: path,
+      );
+
+      recordingPath = path;
+      if (mounted) setState(() => recording = true);
+    } catch (e) {
+      showMessage('Could not start voice recording.');
+      debugPrint('Recording start error: $e');
+    }
+  }
+
+  Future<void> stopAndSendRecording() async {
+    if (!recording || recordingBusy) return;
+    setState(() {
+      recording = false;
+      recordingBusy = true;
+    });
+
+    try {
+      final path = await recorder.stop();
+      final filePath = path ?? recordingPath;
+      recordingPath = null;
+      if (filePath == null) throw Exception('Recording file missing');
+
+      final file = File(filePath);
+      if (!await file.exists()) throw Exception('Recording not found');
+
+      final bytes = await file.readAsBytes();
+      if (bytes.length < 1000) {
+        showMessage('Voice recording is too short.');
+        return;
+      }
+
+      final uid = auth.currentUser!.uid;
+      final storagePath =
+          'voice/$uid/${DateTime.now().microsecondsSinceEpoch}.m4a';
+
+      await supabase.storage.from(mediaBucket).uploadBinary(
+        storagePath,
+        bytes,
+        fileOptions: const FileOptions(
+          contentType: 'audio/mp4',
+          upsert: false,
+        ),
+      );
+
+      await messagesRef.add({
+        'senderId': uid,
+        'text': '',
+        'messageType': 'audio',
+        'mediaPath': storagePath,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      await chatRef.update({
+        'lastMessage': '🎤 Voice message',
+        'lastMessageAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      showMessage('Voice message could not be sent.');
+      debugPrint('Recording upload error: $e');
+    } finally {
+      if (mounted) setState(() => recordingBusy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    recorder.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final disabled = widget.disabled || sending || recordingBusy;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
+      decoration: const BoxDecoration(
+        color: panel,
+        border: Border(top: BorderSide(color: Colors.white12)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (recording)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Row(
+                children: [
+                  Icon(Icons.fiber_manual_record, color: Colors.red, size: 15),
+                  SizedBox(width: 7),
+                  Text(
+                    'Recording... Release mic to send',
+                    style: TextStyle(color: Colors.redAccent),
+                  ),
+                ],
+              ),
+            ),
+          Row(
+            children: [
+              IconButton(
+                tooltip: 'Send image',
+                onPressed: disabled ? null : sendImage,
+                icon: const Icon(Icons.image_outlined, color: gold),
+              ),
+              Expanded(
+                child: TextField(
+                  controller: controller,
+                  enabled: !disabled,
+                  minLines: 1,
+                  maxLines: 4,
+                  decoration: InputDecoration(
+                    hintText: 'Type a message...',
+                    filled: true,
+                    fillColor: bg,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(25),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 12,
+                    ),
+                  ),
+                  onSubmitted: (_) => sendText(),
+                ),
+              ),
+              const SizedBox(width: 4),
+              GestureDetector(
+                onLongPressStart: (_) => startRecording(),
+                onLongPressEnd: (_) => stopAndSendRecording(),
+                child: Container(
+                  padding: const EdgeInsets.all(11),
+                  decoration: BoxDecoration(
+                    color: recording ? Colors.red : gold.withOpacity(.18),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    recording ? Icons.mic : Icons.mic_none,
+                    color: recording ? Colors.white : gold,
+                  ),
+                ),
+              ),
+              IconButton(
+                onPressed: disabled ? null : sendText,
+                icon: sending || recordingBusy
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          color: gold,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Icon(Icons.send, color: gold),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Hold the microphone to record a voice note.',
+            style: TextStyle(color: Colors.white38, fontSize: 10),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // STRANGER CHAT
 
 class ChatScreen extends StatefulWidget {
@@ -956,8 +1432,6 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  final messageController = TextEditingController();
-  bool sending = false;
   bool leaving = false;
   bool partnerLeft = false;
   String partnerName = 'Stranger';
@@ -977,54 +1451,17 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _loadPartner() async {
     try {
       final doc = await db.collection('users').doc(widget.partnerUid).get();
-      if (!mounted) return;
-      setState(() {
-        partnerName = doc.data()?['name']?.toString() ?? 'Stranger';
-      });
-    } catch (_) {}
-  }
-
-  Future<void> _sendMessage() async {
-    final text = messageController.text.trim();
-    if (text.isEmpty || sending || leaving) return;
-
-    if (text.length > 1000) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Message is too long.')),
-      );
-      return;
-    }
-
-    setState(() => sending = true);
-    messageController.clear();
-
-    try {
-      await messagesRef.add({
-        'senderId': auth.currentUser!.uid,
-        'text': text,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      await chatRef.update({
-        'lastMessage': text,
-        'lastMessageAt': FieldValue.serverTimestamp(),
-      });
-    } catch (_) {
       if (mounted) {
-        messageController.text = text;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Message could not be sent.')),
-        );
+        setState(() {
+          partnerName = doc.data()?['name']?.toString() ?? 'Stranger';
+        });
       }
-    } finally {
-      if (mounted) setState(() => sending = false);
-    }
+    } catch (_) {}
   }
 
   Future<void> _closeChat({required bool next}) async {
     if (leaving) return;
-    leaving = true;
-
+    setState(() => leaving = true);
     try {
       await chatRef.update({
         'active': false,
@@ -1035,13 +1472,11 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       debugPrint('Chat close error: $e');
     }
-
     if (mounted) Navigator.pop(context, next);
   }
 
   Future<void> _reportUser() async {
     String reason = 'Inappropriate behaviour';
-
     final selected = await showDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -1080,7 +1515,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     if (selected == null) return;
-
     try {
       await db.collection('reports').add({
         'reporterId': auth.currentUser!.uid,
@@ -1089,7 +1523,6 @@ class _ChatScreenState extends State<ChatScreen> {
         'reason': selected,
         'createdAt': FieldValue.serverTimestamp(),
       });
-
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Report submitted. Thank you.')),
@@ -1110,9 +1543,7 @@ class _ChatScreenState extends State<ChatScreen> {
       builder: (dialogContext) => AlertDialog(
         backgroundColor: panel,
         title: const Text('Block this user?'),
-        content: const Text(
-          'You will not be matched with this user again.',
-        ),
+        content: const Text('You will not be matched with this user again.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
@@ -1125,7 +1556,6 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
-
     if (confirm != true) return;
 
     try {
@@ -1135,7 +1565,6 @@ class _ChatScreenState extends State<ChatScreen> {
           .collection('blocked')
           .doc(widget.partnerUid)
           .set({'blockedAt': FieldValue.serverTimestamp()});
-
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('User blocked.')),
@@ -1152,12 +1581,6 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   @override
-  void dispose() {
-    messageController.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return PopScope(
       canPop: false,
@@ -1169,10 +1592,8 @@ class _ChatScreenState extends State<ChatScreen> {
           title: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                partnerName,
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
+              Text(partnerName,
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
               const Text(
                 'Anonymous chat',
                 style: TextStyle(fontSize: 11, color: Colors.white54),
@@ -1232,7 +1653,6 @@ class _ChatScreenState extends State<ChatScreen> {
                           child: CircularProgressIndicator(color: gold),
                         );
                       }
-
                       final messages = snapshot.data?.docs ?? [];
                       if (messages.isEmpty) {
                         return const Center(
@@ -1242,119 +1662,53 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         );
                       }
-
                       return ListView.builder(
                         padding: const EdgeInsets.all(15),
                         itemCount: messages.length,
                         itemBuilder: (context, index) {
                           final data = messages[index].data();
-                          final mine =
-                              data['senderId'] == auth.currentUser!.uid;
-
-                          return Align(
-                            alignment: mine
-                                ? Alignment.centerRight
-                                : Alignment.centerLeft,
-                            child: Container(
-                              constraints: BoxConstraints(
-                                maxWidth:
-                                    MediaQuery.of(context).size.width * .78,
-                              ),
-                              margin: const EdgeInsets.symmetric(vertical: 5),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 15,
-                                vertical: 11,
-                              ),
-                              decoration: BoxDecoration(
-                                color: mine
-                                    ? const Color(0xFF594521)
-                                    : panel,
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(
-                                  color: mine
-                                      ? gold.withOpacity(.5)
-                                      : Colors.white12,
-                                ),
-                              ),
-                              child: Text(data['text']?.toString() ?? ''),
-                            ),
+                          return ChatMessageBubble(
+                            data: data,
+                            mine: data['senderId'] == auth.currentUser!.uid,
                           );
                         },
                       );
                     },
                   ),
                 ),
+                ChatComposer(
+                  chatId: widget.chatId,
+                  disabled: partnerLeft || leaving,
+                ),
                 Container(
-                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 15),
-                  decoration: const BoxDecoration(
-                    color: panel,
-                    border: Border(top: BorderSide(color: Colors.white12)),
-                  ),
-                  child: Column(
+                  color: panel,
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                  child: Row(
                     children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: messageController,
-                              enabled: !partnerLeft && !leaving,
-                              minLines: 1,
-                              maxLines: 4,
-                              decoration: InputDecoration(
-                                hintText: 'Type a message...',
-                                filled: true,
-                                fillColor: bg,
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(25),
-                                  borderSide: BorderSide.none,
-                                ),
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 18,
-                                  vertical: 12,
-                                ),
-                              ),
-                              onSubmitted: (_) => _sendMessage(),
-                            ),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed:
+                              leaving ? null : () => _closeChat(next: true),
+                          icon: const Icon(Icons.skip_next),
+                          label: const Text('NEXT'),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: gold,
+                            side: const BorderSide(color: gold),
                           ),
-                          const SizedBox(width: 8),
-                          IconButton(
-                            onPressed:
-                                sending || partnerLeft ? null : _sendMessage,
-                            icon: const Icon(Icons.send, color: gold),
-                          ),
-                        ],
+                        ),
                       ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: leaving
-                                  ? null
-                                  : () => _closeChat(next: true),
-                              icon: const Icon(Icons.skip_next),
-                              label: const Text('NEXT'),
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: gold,
-                                side: const BorderSide(color: gold),
-                              ),
-                            ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed:
+                              leaving ? null : () => _closeChat(next: false),
+                          icon: const Icon(Icons.stop),
+                          label: const Text('STOP'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: gold,
+                            foregroundColor: Colors.black,
                           ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: ElevatedButton.icon(
-                              onPressed: leaving
-                                  ? null
-                                  : () => _closeChat(next: false),
-                              icon: const Icon(Icons.stop),
-                              label: const Text('STOP'),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: gold,
-                                foregroundColor: Colors.black,
-                              ),
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
                     ],
                   ),
@@ -1386,7 +1740,6 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
   Future<void> createInvite() async {
     if (loading) return;
-
     setState(() {
       loading = true;
       message = '';
@@ -1405,7 +1758,6 @@ class _FriendsScreenState extends State<FriendsScreen> {
       });
 
       await Clipboard.setData(ClipboardData(text: inviteRef.id));
-
       if (!mounted) return;
 
       showDialog(
@@ -1442,7 +1794,9 @@ class _FriendsScreenState extends State<FriendsScreen> {
         ),
       );
     } catch (_) {
-      if (mounted) setState(() => message = 'Could not create invite. Try again.');
+      if (mounted) {
+        setState(() => message = 'Could not create invite. Try again.');
+      }
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -1450,7 +1804,6 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
   Future<void> joinWithCode() async {
     final code = codeController.text.trim();
-
     if (code.isEmpty || loading) {
       setState(() => message = 'Please enter an invite code.');
       return;
@@ -1464,14 +1817,10 @@ class _FriendsScreenState extends State<FriendsScreen> {
     try {
       final inviteRef = db.collection('friendInvites').doc(code);
       final inviteSnapshot = await inviteRef.get();
-
-      if (!inviteSnapshot.exists) {
-        throw Exception('Invalid invite code.');
-      }
+      if (!inviteSnapshot.exists) throw Exception('Invalid invite code.');
 
       final inviteData = inviteSnapshot.data()!;
       final inviterUid = inviteData['inviterUid']?.toString() ?? '';
-
       if (inviteData['status'] != 'pending') {
         throw Exception('This invite has already been used.');
       }
@@ -1483,7 +1832,6 @@ class _FriendsScreenState extends State<FriendsScreen> {
       final myName = myProfile.data()?['name']?.toString() ?? 'Member';
       final inviterName = inviteData['inviterName']?.toString() ?? 'Friend';
 
-      // Deterministic ID makes the same two users share one chat document.
       final friendshipId = '${inviterUid}_$myUid';
       final friendshipRef = db.collection('friendships').doc(friendshipId);
       final chatRef = db.collection('chats').doc(friendshipId);
@@ -1531,7 +1879,9 @@ class _FriendsScreenState extends State<FriendsScreen> {
       });
 
       codeController.clear();
-      if (mounted) setState(() => message = 'Friend connected successfully!');
+      if (mounted) {
+        setState(() => message = 'Friend connected successfully!');
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -1665,26 +2015,21 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
               final friends = snapshot.data?.docs ?? [];
               if (friends.isEmpty) {
-                return const Padding(
-                  padding: EdgeInsets.all(20),
-                  child: _EmptyState(
-                    icon: Icons.people_outline,
-                    title: 'No friends yet',
-                    subtitle: 'Create an invite code to connect with someone.',
-                  ),
+                return const _EmptyState(
+                  icon: Icons.people_outline,
+                  title: 'No friends yet',
+                  subtitle: 'Create an invite code to connect with someone.',
                 );
               }
 
               return Column(
                 children: friends.map((friend) {
-                  final data = friend.data();
                   final participants =
-                      List<String>.from(data['participants'] ?? []);
+                      List<String>.from(friend.data()['participants'] ?? []);
                   final otherUid = participants.firstWhere(
                     (uid) => uid != myUid,
                     orElse: () => '',
                   );
-
                   if (otherUid.isEmpty) return const SizedBox.shrink();
 
                   return FutureBuilder<
@@ -1694,7 +2039,6 @@ class _FriendsScreenState extends State<FriendsScreen> {
                       final friendName = userSnapshot.data?.data()?['name']
                               ?.toString() ??
                           'Friend';
-
                       return Card(
                         color: panel,
                         child: ListTile(
@@ -1714,18 +2058,16 @@ class _FriendsScreenState extends State<FriendsScreen> {
                             Icons.chat_bubble_outline,
                             color: gold,
                           ),
-                          onTap: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => FriendChatScreen(
-                                  chatId: friend.id,
-                                  partnerUid: otherUid,
-                                  partnerName: friendName,
-                                ),
+                          onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => FriendChatScreen(
+                                chatId: friend.id,
+                                partnerUid: otherUid,
+                                partnerName: friendName,
                               ),
-                            );
-                          },
+                            ),
+                          ),
                         ),
                       );
                     },
@@ -1740,9 +2082,9 @@ class _FriendsScreenState extends State<FriendsScreen> {
   }
 }
 
-// PERMANENT FRIEND CHAT
+// FRIEND CHAT
 
-class FriendChatScreen extends StatefulWidget {
+class FriendChatScreen extends StatelessWidget {
   final String chatId;
   final String partnerUid;
   final String partnerName;
@@ -1755,71 +2097,17 @@ class FriendChatScreen extends StatefulWidget {
   });
 
   @override
-  State<FriendChatScreen> createState() => _FriendChatScreenState();
-}
-
-class _FriendChatScreenState extends State<FriendChatScreen> {
-  final messageController = TextEditingController();
-  bool sending = false;
-
-  DocumentReference<Map<String, dynamic>> get chatRef =>
-      db.collection('chats').doc(widget.chatId);
-
-  CollectionReference<Map<String, dynamic>> get messagesRef =>
-      chatRef.collection('messages');
-
-  Future<void> sendMessage() async {
-    final text = messageController.text.trim();
-    if (text.isEmpty || sending) return;
-
-    if (text.length > 1000) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Message is too long.')),
-      );
-      return;
-    }
-
-    setState(() => sending = true);
-    messageController.clear();
-
-    try {
-      await messagesRef.add({
-        'senderId': auth.currentUser!.uid,
-        'text': text,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      await chatRef.update({
-        'lastMessage': text,
-        'lastMessageAt': FieldValue.serverTimestamp(),
-      });
-    } catch (_) {
-      messageController.text = text;
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Message could not be sent.')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => sending = false);
-    }
-  }
-
-  @override
-  void dispose() {
-    messageController.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
+    final messagesRef =
+        db.collection('chats').doc(chatId).collection('messages');
+
     return Scaffold(
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              widget.partnerName,
+              partnerName,
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
             const Text(
@@ -1861,76 +2149,16 @@ class _FriendChatScreenState extends State<FriendChatScreen> {
                   itemCount: messages.length,
                   itemBuilder: (context, index) {
                     final data = messages[index].data();
-                    final mine = data['senderId'] == auth.currentUser!.uid;
-
-                    return Align(
-                      alignment:
-                          mine ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Container(
-                        constraints: BoxConstraints(
-                          maxWidth: MediaQuery.of(context).size.width * .78,
-                        ),
-                        margin: const EdgeInsets.symmetric(vertical: 5),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 15,
-                          vertical: 11,
-                        ),
-                        decoration: BoxDecoration(
-                          color: mine
-                              ? const Color(0xFF594521)
-                              : panel,
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: mine
-                                ? gold.withOpacity(.5)
-                                : Colors.white12,
-                          ),
-                        ),
-                        child: Text(data['text']?.toString() ?? ''),
-                      ),
+                    return ChatMessageBubble(
+                      data: data,
+                      mine: data['senderId'] == auth.currentUser!.uid,
                     );
                   },
                 );
               },
             ),
           ),
-          Container(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 15),
-            decoration: const BoxDecoration(
-              color: panel,
-              border: Border(top: BorderSide(color: Colors.white12)),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: messageController,
-                    minLines: 1,
-                    maxLines: 4,
-                    decoration: InputDecoration(
-                      hintText: 'Type a message...',
-                      filled: true,
-                      fillColor: bg,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(25),
-                        borderSide: BorderSide.none,
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 18,
-                        vertical: 12,
-                      ),
-                    ),
-                    onSubmitted: (_) => sendMessage(),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                IconButton(
-                  onPressed: sending ? null : sendMessage,
-                  icon: const Icon(Icons.send, color: gold),
-                ),
-              ],
-            ),
-          ),
+          ChatComposer(chatId: chatId),
         ],
       ),
     );
@@ -1946,12 +2174,10 @@ class PremiumScreen extends StatelessWidget {
     BuildContext context,
     String preference,
   ) async {
-    final user = auth.currentUser!;
     try {
-      await db.collection('users').doc(user.uid).set({
+      await db.collection('users').doc(auth.currentUser!.uid).set({
         'preferredGender': preference,
       }, SetOptions(merge: true));
-
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Gender preference saved.')),
@@ -1969,7 +2195,6 @@ class PremiumScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final user = auth.currentUser!;
-
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: db.collection('users').doc(user.uid).snapshots(),
       builder: (context, snapshot) {
@@ -1980,11 +2205,7 @@ class PremiumScreen extends StatelessWidget {
         return ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            const Icon(
-              Icons.workspace_premium_rounded,
-              color: gold,
-              size: 58,
-            ),
+            const Icon(Icons.workspace_premium_rounded, color: gold, size: 58),
             const SizedBox(height: 12),
             const Text(
               'GO PREMIUM',
@@ -2089,7 +2310,6 @@ class ProfileScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final user = auth.currentUser!;
-
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: db.collection('users').doc(user.uid).snapshots(),
       builder: (context, snapshot) {
@@ -2181,10 +2401,7 @@ class ProfileScreen extends StatelessWidget {
               icon: Icons.support_agent_rounded,
               title: 'Customer Care',
               subtitle: 'Contact official Telegram support',
-              onTap: () => _openExternal(
-                context,
-                'https://t.me/ujjwal_jaat01',
-              ),
+              onTap: () => _openExternal(context, 'https://t.me/ujjwal_jaat01'),
             ),
             _ActionTile(
               icon: Icons.admin_panel_settings_rounded,
@@ -2233,7 +2450,6 @@ class EditProfileScreen extends StatefulWidget {
 class _EditProfileScreenState extends State<EditProfileScreen> {
   late final TextEditingController nameController;
   late final TextEditingController bioController;
-
   String? gender;
   bool loading = false;
   String message = '';
@@ -2249,7 +2465,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   Future<void> saveProfile() async {
     final name = nameController.text.trim();
     final bio = bioController.text.trim();
-
     if (name.isEmpty) {
       setState(() => message = 'Name cannot be empty.');
       return;
@@ -2269,8 +2484,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     });
 
     try {
-      final user = auth.currentUser!;
-      await db.collection('users').doc(user.uid).set({
+      await db.collection('users').doc(auth.currentUser!.uid).set({
         'name': name,
         'bio': bio,
         'gender': gender,
@@ -2439,7 +2653,6 @@ class AdminAccessScreen extends StatefulWidget {
 class _AdminAccessScreenState extends State<AdminAccessScreen> {
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
-
   bool isRegister = false;
   bool loading = false;
   String message = '';
@@ -2447,7 +2660,6 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
   Future<void> submit() async {
     final email = emailController.text.trim();
     final password = passwordController.text;
-
     if (email.isEmpty || password.length < 6) {
       setState(() {
         message = 'Enter a valid email and password (minimum 6 characters).';
@@ -2462,7 +2674,6 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
 
     try {
       UserCredential credential;
-
       if (isRegister) {
         credential = await auth.createUserWithEmailAndPassword(
           email: email,
@@ -2479,7 +2690,6 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
       final adminDoc = await db.collection('admins').doc(user.uid).get();
 
       if (!mounted) return;
-
       if (adminDoc.exists && adminDoc.data()?['role'] == 'admin') {
         Navigator.pushReplacement(
           context,
@@ -2680,7 +2890,6 @@ class UserManagementScreen extends StatelessWidget {
         {field: value},
         SetOptions(merge: true),
       );
-
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -2712,7 +2921,6 @@ class UserManagementScreen extends StatelessWidget {
         'isPremium': true,
         'premiumExpiresAt': Timestamp.fromDate(expiry),
       }, SetOptions(merge: true));
-
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Premium activated for $days day(s).')),
@@ -2736,7 +2944,6 @@ class UserManagementScreen extends StatelessWidget {
         'isPremium': false,
         'premiumExpiresAt': FieldValue.delete(),
       }, SetOptions(merge: true));
-
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Premium deactivated.')),
@@ -2888,14 +3095,12 @@ class UserManagementScreen extends StatelessWidget {
                           isBanned ? 'User is banned' : 'User is active',
                         ),
                         value: isBanned,
-                        onChanged: (value) {
-                          _changeUserStatus(
-                            context,
-                            document.id,
-                            'isBanned',
-                            value,
-                          );
-                        },
+                        onChanged: (value) => _changeUserStatus(
+                          context,
+                          document.id,
+                          'isBanned',
+                          value,
+                        ),
                       ),
                       const Divider(color: Colors.white12),
                       ListTile(
@@ -3032,7 +3237,6 @@ class _StatCard extends StatelessWidget {
 
 class _Feature extends StatelessWidget {
   final String text;
-
   const _Feature({required this.text});
 
   @override
