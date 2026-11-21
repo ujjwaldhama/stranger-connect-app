@@ -26,42 +26,42 @@ final db = FirebaseFirestore.instance;
 final auth = FirebaseAuth.instance;
 final supabase = Supabase.instance.client;
 
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp();
-  await Supabase.initialize(
-    url: supabaseUrl,
-    anonKey: supabaseKey,
+// MESSAGE EXPIRY: 10 MINUTES
+
+Timestamp messageExpiry() {
+  return Timestamp.fromDate(
+    DateTime.now().add(const Duration(minutes: 10)),
   );
-  runApp(const StrangerConnectApp());
 }
 
-class StrangerConnectApp extends StatelessWidget {
-  const StrangerConnectApp({super.key});
+Future<void> cleanupExpiredMessages(String chatId) async {
+  try {
+    final messagesRef =
+        db.collection('chats').doc(chatId).collection('messages');
 
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'STRENZO',
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: bg,
-        colorScheme: const ColorScheme.dark(
-          primary: gold,
-          secondary: gold,
-          surface: panel,
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: bg,
-          foregroundColor: gold,
-          elevation: 0,
-        ),
-        useMaterial3: true,
-      ),
-      home: const AuthGate(),
-    );
+    final expiredMessages = await messagesRef
+        .where('expiresAt', isLessThanOrEqualTo: Timestamp.now())
+        .get();
+
+    for (final message in expiredMessages.docs) {
+      try {
+        await message.reference.delete();
+      } catch (e) {
+        debugPrint('Expired message deletion failed: $e');
+      }
+    }
+  } catch (e) {
+    debugPrint('Message cleanup error: $e');
   }
+}
+
+bool isMessageExpired(Map<String, dynamic> data) {
+  final expiry = data['expiresAt'];
+
+  // Old messages without expiry remain visible.
+  if (expiry is! Timestamp) return false;
+
+  return !expiry.toDate().isAfter(DateTime.now());
 }
 
 // PREMIUM HELPERS
@@ -605,6 +605,8 @@ class DiscoverScreen extends StatelessWidget {
   }
 }
 
+// PART 2 STARTS FROM HERE:
+// // STRANGER MATCHING
 // STRANGER MATCHING
 
 class FindStrangerScreen extends StatefulWidget {
@@ -615,801 +617,212 @@ class FindStrangerScreen extends StatefulWidget {
 }
 
 class _FindStrangerScreenState extends State<FindStrangerScreen> {
-  final user = auth.currentUser!;
-  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? ownSubscription;
+  bool searching = false;
+  String status = 'Ready to meet someone new.';
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? queueSubscription;
+  String? currentChatId;
+  Timer? searchTimer;
 
-  bool searching = true;
-  bool openingChat = false;
-  bool working = false;
-  bool closed = false;
-  String status = 'Finding someone for you...';
-  String? errorMessage;
+  String get uid => auth.currentUser!.uid;
 
   @override
-  void initState() {
-    super.initState();
-    _startSearch();
+  void dispose() {
+    queueSubscription?.cancel();
+    searchTimer?.cancel();
+    super.dispose();
   }
 
-  Future<void> _startSearch() async {
-    if (closed || !mounted) return;
+  Future<void> startSearching() async {
+    if (searching) return;
+
     setState(() {
       searching = true;
-      openingChat = false;
-      errorMessage = null;
       status = 'Finding someone for you...';
     });
 
     try {
-      final profileDoc = await db.collection('users').doc(user.uid).get();
-      final profile = profileDoc.data();
-      if (profile == null) throw Exception('Please complete your profile first.');
-      if (profile['isBanned'] == true) throw Exception('Your account is restricted.');
+      final userDoc = await db.collection('users').doc(uid).get();
+      final userData = userDoc.data() ?? {};
 
-      final gender = profile['gender']?.toString() ?? '';
-      if (gender != 'Male' && gender != 'Female') {
-        throw Exception('Please select your gender in Edit Profile first.');
-      }
-
-      final premium = isPremiumActive(profile);
-      final preference = premium
-          ? (profile['preferredGender']?.toString() ?? 'Both')
+      final gender = userData['gender'] ?? 'Other';
+      final preference = isPremiumActive(userData)
+          ? (userData['genderPreference'] ?? 'Both')
           : 'Both';
 
-      final blockedSnapshot = await db
-          .collection('users')
-          .doc(user.uid)
-          .collection('blocked')
-          .get();
-      final blocked = blockedSnapshot.docs.map((d) => d.id).toList();
-
-      final queueRef = db.collection('matchQueue').doc(user.uid);
-      await queueRef.set({
-        'uid': user.uid,
+      await db.collection('matchQueue').doc(uid).set({
+        'uid': uid,
         'gender': gender,
-        'preferredGender': preference,
-        'blockedUids': blocked,
-        'status': 'waiting',
-        'chatId': null,
-        'partnerUid': null,
+        'preference': preference,
         'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      if (!mounted || closed) return;
-      await ownSubscription?.cancel();
-      await queueSubscription?.cancel();
-
-      ownSubscription = queueRef.snapshots().listen((snapshot) {
-        final data = snapshot.data();
-        if (data == null || !mounted || closed) return;
-        if (data['status'] == 'matched') {
-          final chatId = data['chatId']?.toString();
-          final partnerUid = data['partnerUid']?.toString();
-          if (chatId != null && partnerUid != null) {
-            _openChat(chatId, partnerUid);
-          }
-        }
+        'status': 'waiting',
       });
 
       queueSubscription = db
           .collection('matchQueue')
-          .where('status', isEqualTo: 'waiting')
           .snapshots()
-          .listen((snapshot) => _tryMatch(snapshot.docs));
+          .listen((snapshot) async {
+        if (!searching || currentChatId != null) return;
 
-      setState(() => status = 'Searching for an available stranger...');
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        searching = false;
-        errorMessage = e.toString().replaceFirst('Exception: ', '');
-        status = 'Unable to start matching.';
-      });
-    }
-  }
+        for (final doc in snapshot.docs) {
+          if (doc.id == uid) continue;
 
-  Future<void> _tryMatch(
-    List<QueryDocumentSnapshot<Map<String, dynamic>>> candidates,
-  ) async {
-    if (working || openingChat || closed || !mounted) return;
-    working = true;
-    try {
-      final myQueueRef = db.collection('matchQueue').doc(user.uid);
-      final mySnapshot = await myQueueRef.get();
-      final myData = mySnapshot.data();
-      if (myData == null || myData['status'] != 'waiting') return;
+          final other = doc.data();
+          if (other['status'] != 'waiting') continue;
 
-      final myGender = myData['gender']?.toString() ?? '';
-      final myPreference = myData['preferredGender']?.toString() ?? 'Both';
-      final myBlocked = List<String>.from(myData['blockedUids'] ?? const []);
+          final otherGender = other['gender'] ?? 'Other';
+          final otherPreference = other['preference'] ?? 'Both';
 
-      for (final candidate in candidates) {
-        if (!mounted || closed || openingChat) return;
-        final partnerUid = candidate.id;
-        if (partnerUid == user.uid || myBlocked.contains(partnerUid)) continue;
+          if (!genderMatches(preference, otherGender)) continue;
+          if (!genderMatches(otherPreference, gender)) continue;
 
-        final candidateData = candidate.data();
-        final partnerGender = candidateData['gender']?.toString() ?? '';
-        final partnerPreference =
-            candidateData['preferredGender']?.toString() ?? 'Both';
-        final partnerBlocked =
-            List<String>.from(candidateData['blockedUids'] ?? const []);
+          final otherRef = db.collection('matchQueue').doc(doc.id);
+          final myRef = db.collection('matchQueue').doc(uid);
 
-        if (partnerBlocked.contains(user.uid)) continue;
-        if (!genderMatches(myPreference, partnerGender)) continue;
-        if (!genderMatches(partnerPreference, myGender)) continue;
+          final chatRef = db.collection('chats').doc();
 
-        final partnerRef = db.collection('matchQueue').doc(partnerUid);
-        final chatRef = db.collection('chats').doc();
+          try {
+            await db.runTransaction((transaction) async {
+              final mySnapshot = await transaction.get(myRef);
+              final otherSnapshot = await transaction.get(otherRef);
 
-        final matched = await db.runTransaction<bool>((transaction) async {
-          final myCurrent = await transaction.get(myQueueRef);
-          final partnerCurrent = await transaction.get(partnerRef);
-          if (!myCurrent.exists || !partnerCurrent.exists) return false;
+              if (!mySnapshot.exists || !otherSnapshot.exists) {
+                throw Exception('User is no longer available.');
+              }
 
-          if (myCurrent.data()?['status'] != 'waiting' ||
-              partnerCurrent.data()?['status'] != 'waiting') {
-            return false;
+              if (mySnapshot.data()?['status'] != 'waiting' ||
+                  otherSnapshot.data()?['status'] != 'waiting') {
+                throw Exception('Already matched.');
+              }
+
+              transaction.update(myRef, {
+                'status': 'matched',
+                'chatId': chatRef.id,
+              });
+
+              transaction.update(otherRef, {
+                'status': 'matched',
+                'chatId': chatRef.id,
+              });
+
+              transaction.set(chatRef, {
+                'members': [uid, doc.id],
+                'type': 'stranger',
+                'createdAt': FieldValue.serverTimestamp(),
+              });
+            });
+
+            currentChatId = chatRef.id;
+            await queueSubscription?.cancel();
+
+            if (!mounted) return;
+
+            setState(() {
+              searching = false;
+              status = 'Stranger found!';
+            });
+
+            await Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ChatScreen(
+                  chatId: chatRef.id,
+                  partnerUid: doc.id,
+                ),
+              ),
+            );
+            return;
+          } catch (e) {
+            debugPrint('Matching error: $e');
           }
-          if (partnerCurrent.data()?['uid'] != partnerUid) return false;
+        }
+      });
 
-          transaction.set(chatRef, {
-            'participants': [user.uid, partnerUid],
-            'active': true,
-            'createdAt': FieldValue.serverTimestamp(),
-            'lastMessage': '',
-            'lastMessageAt': FieldValue.serverTimestamp(),
-          });
-          transaction.update(myQueueRef, {
-            'status': 'matched',
-            'chatId': chatRef.id,
-            'partnerUid': partnerUid,
-          });
-          transaction.update(partnerRef, {
-            'status': 'matched',
-            'chatId': chatRef.id,
-            'partnerUid': user.uid,
-          });
-          return true;
-        });
+      searchTimer = Timer(const Duration(seconds: 30), () async {
+        if (searching && currentChatId == null) {
+          await stopSearching();
+          if (!mounted) return;
 
-        if (matched) return;
-      }
+          setState(() {
+            status = 'No stranger found. Please try again.';
+          });
+        }
+      });
     } catch (e) {
-      debugPrint('Matching error: $e');
-    } finally {
-      working = false;
+      if (mounted) {
+        setState(() {
+          searching = false;
+          status = 'Could not start searching.';
+        });
+      }
     }
   }
 
-  Future<void> _openChat(String chatId, String partnerUid) async {
-    if (openingChat || closed || !mounted) return;
-    openingChat = true;
-    searching = false;
+  Future<void> stopSearching() async {
+    searchTimer?.cancel();
     await queueSubscription?.cancel();
-    await ownSubscription?.cancel();
-    if (!mounted || closed) return;
 
-    final next = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ChatScreen(chatId: chatId, partnerUid: partnerUid),
-      ),
-    );
-
-    if (!mounted || closed) return;
-    openingChat = false;
-    if (next == true) {
-      await _startSearch();
-    } else {
-      await _leaveSearch();
-      if (mounted) Navigator.pop(context);
-    }
-  }
-
-  Future<void> _leaveSearch() async {
-    closed = true;
-    await queueSubscription?.cancel();
-    await ownSubscription?.cancel();
     try {
-      await db.collection('matchQueue').doc(user.uid).delete();
+      await db.collection('matchQueue').doc(uid).delete();
     } catch (_) {}
-  }
 
-  @override
-  void dispose() {
-    closed = true;
-    queueSubscription?.cancel();
-    ownSubscription?.cancel();
-    db.collection('matchQueue').doc(user.uid).delete().catchError((_) {});
-    super.dispose();
+    if (!mounted) return;
+
+    setState(() {
+      searching = false;
+      currentChatId = null;
+      status = 'Search stopped.';
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('FIND STRANGER'),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () async {
-            await _leaveSearch();
-            if (mounted) Navigator.pop(context);
-          },
-        ),
-      ),
+      appBar: AppBar(title: const Text('Find Stranger')),
       body: Center(
         child: Padding(
-          padding: const EdgeInsets.all(28),
+          padding: const EdgeInsets.all(25),
           child: Column(
-            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              if (searching && errorMessage == null) ...[
-                const Icon(Icons.travel_explore, color: gold, size: 75),
-                const SizedBox(height: 25),
-                const CircularProgressIndicator(color: gold),
-              ] else
-                Icon(
-                  errorMessage == null ? Icons.chat : Icons.error_outline,
-                  color: gold,
-                  size: 75,
-                ),
+              Icon(
+                searching ? Icons.travel_explore : Icons.people_alt_outlined,
+                color: gold,
+                size: 90,
+              ),
               const SizedBox(height: 25),
               Text(
-                errorMessage ?? status,
-                textAlign: TextAlign.center,
+                searching ? 'SEARCHING...' : 'READY TO CONNECT?',
                 style: const TextStyle(
                   color: gold,
-                  fontSize: 19,
-                  fontWeight: FontWeight.bold,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 23,
                 ),
               ),
               const SizedBox(height: 12),
-              const Text(
-                'Please wait while we look for someone available.',
+              Text(
+                status,
                 textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white54),
+                style: const TextStyle(color: Colors.white70),
               ),
-              const SizedBox(height: 30),
-              if (errorMessage != null)
-                ElevatedButton(
-                  onPressed: _startSearch,
+              const SizedBox(height: 35),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: searching ? stopSearching : startSearching,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: gold,
                     foregroundColor: Colors.black,
+                    padding: const EdgeInsets.all(17),
                   ),
-                  child: const Text('TRY AGAIN'),
-                ),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  await _leaveSearch();
-                  if (mounted) Navigator.pop(context);
-                },
-                icon: const Icon(Icons.close),
-                label: const Text('CANCEL SEARCH'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: gold,
-                  side: const BorderSide(color: gold),
+                  child: Text(
+                    searching ? 'STOP SEARCHING' : 'FIND STRANGER',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-// CHAT MESSAGE BUBBLE - TEXT / IMAGE / VOICE
-
-class ChatMessageBubble extends StatelessWidget {
-  final Map<String, dynamic> data;
-  final bool mine;
-
-  const ChatMessageBubble({
-    super.key,
-    required this.data,
-    required this.mine,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final type = data['messageType']?.toString() ?? 'text';
-
-    return Align(
-      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * .78,
-        ),
-        margin: const EdgeInsets.symmetric(vertical: 5),
-        padding: const EdgeInsets.all(11),
-        decoration: BoxDecoration(
-          color: mine ? const Color(0xFF594521) : panel,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: mine ? gold.withOpacity(.5) : Colors.white12,
-          ),
-        ),
-        child: type == 'image'
-            ? ChatImage(data: data)
-            : type == 'audio'
-                ? ChatAudio(data: data)
-                : Text(data['text']?.toString() ?? ''),
-      ),
-    );
-  }
-}
-
-class ChatImage extends StatefulWidget {
-  final Map<String, dynamic> data;
-  const ChatImage({super.key, required this.data});
-
-  @override
-  State<ChatImage> createState() => _ChatImageState();
-}
-
-class _ChatImageState extends State<ChatImage> {
-  String? url;
-  bool failed = false;
-
-  @override
-  void initState() {
-    super.initState();
-    load();
-  }
-
-  Future<void> load() async {
-    try {
-      final path = widget.data['mediaPath']?.toString() ?? '';
-      if (path.isEmpty) throw Exception('Missing image path');
-      final result = await supabase.storage
-          .from(mediaBucket)
-          .createSignedUrl(path, 60 * 60 * 24 * 7);
-      if (mounted) setState(() => url = result);
-    } catch (_) {
-      if (mounted) setState(() => failed = true);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (failed) {
-      return const SizedBox(
-        width: 190,
-        child: Text('Image could not be loaded.',
-            style: TextStyle(color: Colors.white70)),
-      );
-    }
-    if (url == null) {
-      return const SizedBox(
-        width: 190,
-        height: 150,
-        child: Center(child: CircularProgressIndicator(color: gold)),
-      );
-    }
-    return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => Scaffold(
-            backgroundColor: Colors.black,
-            appBar: AppBar(),
-            body: Center(
-              child: InteractiveViewer(
-                child: Image.network(url!, fit: BoxFit.contain),
-              ),
-            ),
-          ),
-        ),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: Image.network(
-          url!,
-          width: 220,
-          height: 220,
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) =>
-              const Text('Could not display image.'),
-        ),
-      ),
-    );
-  }
-}
-
-class ChatAudio extends StatefulWidget {
-  final Map<String, dynamic> data;
-  const ChatAudio({super.key, required this.data});
-
-  @override
-  State<ChatAudio> createState() => _ChatAudioState();
-}
-
-class _ChatAudioState extends State<ChatAudio> {
-  final player = AudioPlayer();
-  bool playing = false;
-  bool loading = false;
-  StreamSubscription<void>? completedSubscription;
-
-  @override
-  void initState() {
-    super.initState();
-    completedSubscription = player.onPlayerComplete.listen((_) {
-      if (mounted) setState(() => playing = false);
-    });
-  }
-
-  Future<void> toggle() async {
-    if (loading) return;
-    try {
-      if (playing) {
-        await player.pause();
-        if (mounted) setState(() => playing = false);
-        return;
-      }
-
-      setState(() => loading = true);
-      final path = widget.data['mediaPath']?.toString() ?? '';
-      if (path.isEmpty) throw Exception('Missing audio path');
-
-      final url = await supabase.storage
-          .from(mediaBucket)
-          .createSignedUrl(path, 60 * 60 * 24 * 7);
-
-      await player.play(UrlSource(url));
-      if (mounted) setState(() => playing = true);
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Voice message could not be played.')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => loading = false);
-    }
-  }
-
-  @override
-  void dispose() {
-    completedSubscription?.cancel();
-    player.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 190,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          IconButton(
-            onPressed: loading ? null : toggle,
-            icon: loading
-                ? const SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(
-                      color: gold,
-                      strokeWidth: 2,
-                    ),
-                  )
-                : Icon(
-                    playing ? Icons.pause_circle : Icons.play_circle,
-                    color: gold,
-                    size: 34,
-                  ),
-          ),
-          const Expanded(
-            child: Text(
-              'Voice message',
-              style: TextStyle(color: Colors.white),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// SHARED CHAT COMPOSER
-// Used by both Stranger Chat and Friend Chat.
-
-class ChatComposer extends StatefulWidget {
-  final String chatId;
-  final bool disabled;
-
-  const ChatComposer({
-    super.key,
-    required this.chatId,
-    this.disabled = false,
-  });
-
-  @override
-  State<ChatComposer> createState() => _ChatComposerState();
-}
-
-class _ChatComposerState extends State<ChatComposer> {
-  final controller = TextEditingController();
-  final recorder = AudioRecorder();
-  bool sending = false;
-  bool recording = false;
-  bool recordingBusy = false;
-  String? recordingPath;
-
-  DocumentReference<Map<String, dynamic>> get chatRef =>
-      db.collection('chats').doc(widget.chatId);
-
-  CollectionReference<Map<String, dynamic>> get messagesRef =>
-      chatRef.collection('messages');
-
-  void showMessage(String value) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(value)),
-    );
-  }
-
-  Future<void> sendText() async {
-    final text = controller.text.trim();
-    if (text.isEmpty || sending || widget.disabled) return;
-    if (text.length > 1000) {
-      showMessage('Message is too long.');
-      return;
-    }
-
-    setState(() => sending = true);
-    controller.clear();
-
-    try {
-      await messagesRef.add({
-        'senderId': auth.currentUser!.uid,
-        'text': text,
-        'messageType': 'text',
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-      await chatRef.update({
-        'lastMessage': text,
-        'lastMessageAt': FieldValue.serverTimestamp(),
-      });
-    } catch (_) {
-      controller.text = text;
-      showMessage('Message could not be sent.');
-    } finally {
-      if (mounted) setState(() => sending = false);
-    }
-  }
-
-  Future<void> sendImage() async {
-    if (sending || widget.disabled) return;
-    try {
-      final picked = await ImagePicker().pickImage(
-        source: ImageSource.gallery,
-        imageQuality: 80,
-        maxWidth: 1600,
-      );
-      if (picked == null) return;
-
-      setState(() => sending = true);
-      final bytes = await picked.readAsBytes();
-      final uid = auth.currentUser!.uid;
-      final path = 'images/$uid/${DateTime.now().microsecondsSinceEpoch}_${picked.name.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_')}';
-
-      await supabase.storage.from(mediaBucket).uploadBinary(
-        path,
-        bytes,
-        fileOptions: const FileOptions(
-          contentType: 'image/jpeg',
-          upsert: false,
-        ),
-      );
-
-      await messagesRef.add({
-        'senderId': uid,
-        'text': '',
-        'messageType': 'image',
-        'mediaPath': path,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      await chatRef.update({
-        'lastMessage': '📷 Image',
-        'lastMessageAt': FieldValue.serverTimestamp(),
-      });
-    } catch (e) {
-      showMessage('Image could not be sent. Check Storage settings.');
-      debugPrint('Image upload error: $e');
-    } finally {
-      if (mounted) setState(() => sending = false);
-    }
-  }
-
-  Future<void> startRecording() async {
-    if (recording || recordingBusy || sending || widget.disabled) return;
-    try {
-      final allowed = await recorder.hasPermission();
-      if (!allowed) {
-        showMessage('Microphone permission is required.');
-        return;
-      }
-
-      final path =
-          '${Directory.systemTemp.path}/voice_${DateTime.now().microsecondsSinceEpoch}.m4a';
-
-      await recorder.start(
-        const RecordConfig(
-          encoder: AudioEncoder.aacLc,
-          bitRate: 128000,
-          sampleRate: 44100,
-        ),
-        path: path,
-      );
-
-      recordingPath = path;
-      if (mounted) setState(() => recording = true);
-    } catch (e) {
-      showMessage('Could not start voice recording.');
-      debugPrint('Recording start error: $e');
-    }
-  }
-
-  Future<void> stopAndSendRecording() async {
-    if (!recording || recordingBusy) return;
-    setState(() {
-      recording = false;
-      recordingBusy = true;
-    });
-
-    try {
-      final path = await recorder.stop();
-      final filePath = path ?? recordingPath;
-      recordingPath = null;
-      if (filePath == null) throw Exception('Recording file missing');
-
-      final file = File(filePath);
-      if (!await file.exists()) throw Exception('Recording not found');
-
-      final bytes = await file.readAsBytes();
-      if (bytes.length < 1000) {
-        showMessage('Voice recording is too short.');
-        return;
-      }
-
-      final uid = auth.currentUser!.uid;
-      final storagePath =
-          'voice/$uid/${DateTime.now().microsecondsSinceEpoch}.m4a';
-
-      await supabase.storage.from(mediaBucket).uploadBinary(
-        storagePath,
-        bytes,
-        fileOptions: const FileOptions(
-          contentType: 'audio/mp4',
-          upsert: false,
-        ),
-      );
-
-      await messagesRef.add({
-        'senderId': uid,
-        'text': '',
-        'messageType': 'audio',
-        'mediaPath': storagePath,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      await chatRef.update({
-        'lastMessage': '🎤 Voice message',
-        'lastMessageAt': FieldValue.serverTimestamp(),
-      });
-    } catch (e) {
-      showMessage('Voice message could not be sent.');
-      debugPrint('Recording upload error: $e');
-    } finally {
-      if (mounted) setState(() => recordingBusy = false);
-    }
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    recorder.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final disabled = widget.disabled || sending || recordingBusy;
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
-      decoration: const BoxDecoration(
-        color: panel,
-        border: Border(top: BorderSide(color: Colors.white12)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (recording)
-            const Padding(
-              padding: EdgeInsets.only(bottom: 8),
-              child: Row(
-                children: [
-                  Icon(Icons.fiber_manual_record, color: Colors.red, size: 15),
-                  SizedBox(width: 7),
-                  Text(
-                    'Recording... Release mic to send',
-                    style: TextStyle(color: Colors.redAccent),
-                  ),
-                ],
-              ),
-            ),
-          Row(
-            children: [
-              IconButton(
-                tooltip: 'Send image',
-                onPressed: disabled ? null : sendImage,
-                icon: const Icon(Icons.image_outlined, color: gold),
-              ),
-              Expanded(
-                child: TextField(
-                  controller: controller,
-                  enabled: !disabled,
-                  minLines: 1,
-                  maxLines: 4,
-                  decoration: InputDecoration(
-                    hintText: 'Type a message...',
-                    filled: true,
-                    fillColor: bg,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(25),
-                      borderSide: BorderSide.none,
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 18,
-                      vertical: 12,
-                    ),
-                  ),
-                  onSubmitted: (_) => sendText(),
-                ),
-              ),
-              const SizedBox(width: 4),
-              GestureDetector(
-                onLongPressStart: (_) => startRecording(),
-                onLongPressEnd: (_) => stopAndSendRecording(),
-                child: Container(
-                  padding: const EdgeInsets.all(11),
-                  decoration: BoxDecoration(
-                    color: recording ? Colors.red : gold.withOpacity(.18),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    recording ? Icons.mic : Icons.mic_none,
-                    color: recording ? Colors.white : gold,
-                  ),
-                ),
-              ),
-              IconButton(
-                onPressed: disabled ? null : sendText,
-                icon: sending || recordingBusy
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                          color: gold,
-                          strokeWidth: 2,
-                        ),
-                      )
-                    : const Icon(Icons.send, color: gold),
-              ),
-            ],
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            'Hold the microphone to record a voice note.',
-            style: TextStyle(color: Colors.white38, fontSize: 10),
-          ),
-        ],
       ),
     );
   }
@@ -1432,297 +845,577 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  Timer? cleanupTimer;
+  Timer? refreshTimer;
   bool leaving = false;
-  bool partnerLeft = false;
-  String partnerName = 'Stranger';
-
-  DocumentReference<Map<String, dynamic>> get chatRef =>
-      db.collection('chats').doc(widget.chatId);
-
-  CollectionReference<Map<String, dynamic>> get messagesRef =>
-      chatRef.collection('messages');
 
   @override
   void initState() {
     super.initState();
-    _loadPartner();
+
+    cleanupExpiredMessages(widget.chatId);
+
+    cleanupTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) {
+        cleanupExpiredMessages(widget.chatId);
+      },
+    );
+
+    refreshTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) {
+        if (mounted) setState(() {});
+      },
+    );
   }
 
-  Future<void> _loadPartner() async {
-    try {
-      final doc = await db.collection('users').doc(widget.partnerUid).get();
-      if (mounted) {
-        setState(() {
-          partnerName = doc.data()?['name']?.toString() ?? 'Stranger';
-        });
-      }
-    } catch (_) {}
+  @override
+  void dispose() {
+    cleanupTimer?.cancel();
+    refreshTimer?.cancel();
+    super.dispose();
   }
 
-  Future<void> _closeChat({required bool next}) async {
+  Future<void> leaveChat() async {
     if (leaving) return;
-    setState(() => leaving = true);
+    leaving = true;
+
     try {
-      await chatRef.update({
-        'active': false,
+      await db.collection('chats').doc(widget.chatId).update({
         'endedBy': auth.currentUser!.uid,
         'endedAt': FieldValue.serverTimestamp(),
       });
-      await db.collection('matchQueue').doc(auth.currentUser!.uid).delete();
-    } catch (e) {
-      debugPrint('Chat close error: $e');
-    }
-    if (mounted) Navigator.pop(context, next);
+    } catch (_) {}
+
+    if (!mounted) return;
+    Navigator.pop(context);
   }
 
-  Future<void> _reportUser() async {
-    String reason = 'Inappropriate behaviour';
-    final selected = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: panel,
-        title: const Text('Report Stranger'),
-        content: DropdownButtonFormField<String>(
-          value: reason,
-          decoration: const InputDecoration(
-            border: OutlineInputBorder(),
-            labelText: 'Reason',
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Stranger Chat'),
+        actions: [
+          IconButton(
+            onPressed: leaveChat,
+            icon: const Icon(Icons.stop_circle_outlined),
+            tooltip: 'Stop Chat',
           ),
-          items: const [
-            DropdownMenuItem(
-              value: 'Inappropriate behaviour',
-              child: Text('Inappropriate behaviour'),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+              stream: db
+                  .collection('chats')
+                  .doc(widget.chatId)
+                  .collection('messages')
+                  .orderBy('createdAt', descending: true)
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(
+                    child: CircularProgressIndicator(color: gold),
+                  );
+                }
+
+                final messages = (snapshot.data?.docs ?? [])
+                    .where((doc) => !isMessageExpired(doc.data()))
+                    .toList();
+
+                if (messages.isEmpty) {
+                  return const Center(
+                    child: Text(
+                      'Say hello to your stranger!',
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                  );
+                }
+
+                return ListView.builder(
+                  reverse: true,
+                  padding: const EdgeInsets.all(12),
+                  itemCount: messages.length,
+                  itemBuilder: (context, index) {
+                    final message = messages[index];
+                    final data = message.data();
+                    final mine = data['senderId'] ==
+                        auth.currentUser!.uid;
+
+                    return ChatMessageBubble(
+                      data: data,
+                      mine: mine,
+                      messageRef: message.reference,
+                    );
+                  },
+                );
+              },
             ),
-            DropdownMenuItem(value: 'Harassment', child: Text('Harassment')),
-            DropdownMenuItem(value: 'Spam or scam', child: Text('Spam or scam')),
-            DropdownMenuItem(value: 'Other', child: Text('Other')),
-          ],
-          onChanged: (value) {
-            if (value != null) reason = value;
-          },
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('CANCEL'),
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, reason),
-            child: const Text('REPORT'),
-          ),
+          ChatComposer(chatId: widget.chatId),
         ],
       ),
     );
+  }
+}
 
-    if (selected == null) return;
-    try {
-      await db.collection('reports').add({
-        'reporterId': auth.currentUser!.uid,
-        'reportedUid': widget.partnerUid,
-        'chatId': widget.chatId,
-        'reason': selected,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Report submitted. Thank you.')),
-        );
-      }
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not submit report.')),
-        );
-      }
+// CHAT MESSAGE BUBBLE
+
+class ChatMessageBubble extends StatefulWidget {
+  final Map<String, dynamic> data;
+  final bool mine;
+  final DocumentReference<Map<String, dynamic>>? messageRef;
+
+  const ChatMessageBubble({
+    super.key,
+    required this.data,
+    required this.mine,
+    this.messageRef,
+  });
+
+  @override
+  State<ChatMessageBubble> createState() => _ChatMessageBubbleState();
+}
+
+class _ChatMessageBubbleState extends State<ChatMessageBubble> {
+  bool markingSeen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    markSeen();
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatMessageBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.data['seen'] != widget.data['seen']) {
+      markSeen();
     }
   }
 
-  Future<void> _blockUser() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: panel,
-        title: const Text('Block this user?'),
-        content: const Text('You will not be matched with this user again.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('CANCEL'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('BLOCK'),
-          ),
-        ],
-      ),
-    );
-    if (confirm != true) return;
+  Future<void> markSeen() async {
+    if (widget.mine ||
+        widget.data['seen'] == true ||
+        widget.messageRef == null ||
+        markingSeen) {
+      return;
+    }
+
+    markingSeen = true;
 
     try {
-      await db
-          .collection('users')
-          .doc(auth.currentUser!.uid)
-          .collection('blocked')
-          .doc(widget.partnerUid)
-          .set({'blockedAt': FieldValue.serverTimestamp()});
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('User blocked.')),
-        );
-      }
-      await _closeChat(next: false);
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not block this user.')),
-        );
-      }
+      await widget.messageRef!.update({
+        'seen': true,
+        'seenAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      debugPrint('Seen update failed: $e');
+    } finally {
+      markingSeen = false;
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && !leaving) _closeChat(next: false);
-      },
-      child: Scaffold(
-        appBar: AppBar(
-          title: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(partnerName,
-                  style: const TextStyle(fontWeight: FontWeight.bold)),
-              const Text(
-                'Anonymous chat',
-                style: TextStyle(fontSize: 11, color: Colors.white54),
+    final data = widget.data;
+    final mine = widget.mine;
+    final type = data['type'] ?? 'text';
+
+    return Align(
+      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * .78,
+        ),
+        margin: const EdgeInsets.symmetric(vertical: 5),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: mine ? const Color(0xFF392044) : panel,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: gold.withOpacity(.22)),
+        ),
+        child: Column(
+          crossAxisAlignment:
+              mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            if (type == 'image')
+              ChatImage(url: data['url'] ?? ''),
+            if (type == 'audio')
+              ChatAudio(url: data['url'] ?? ''),
+            if (type == 'text')
+              Text(
+                data['text'] ?? '',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                ),
+              ),
+            if (mine) ...[
+              const SizedBox(height: 5),
+              Text(
+                data['seen'] == true ? 'Seen' : 'Sent',
+                style: TextStyle(
+                  color: data['seen'] == true
+                      ? gold
+                      : Colors.white54,
+                  fontSize: 10,
+                ),
               ),
             ],
-          ),
-          actions: [
-            PopupMenuButton<String>(
-              icon: const Icon(Icons.more_vert),
-              onSelected: (value) {
-                if (value == 'report') _reportUser();
-                if (value == 'block') _blockUser();
-              },
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'report', child: Text('Report User')),
-                PopupMenuItem(value: 'block', child: Text('Block User')),
-              ],
-            ),
           ],
-        ),
-        body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-          stream: chatRef.snapshots(),
-          builder: (context, chatSnapshot) {
-            final chatData = chatSnapshot.data?.data();
-            if (chatData != null &&
-                chatData['active'] == false &&
-                !leaving) {
-              partnerLeft = true;
-            }
-
-            return Column(
-              children: [
-                if (partnerLeft)
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    color: const Color(0xFF302719),
-                    child: const Text(
-                      'The other person has left this chat.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: gold),
-                    ),
-                  ),
-                Expanded(
-                  child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                    stream: messagesRef
-                        .orderBy('createdAt', descending: false)
-                        .snapshots(),
-                    builder: (context, snapshot) {
-                      if (snapshot.hasError) {
-                        return const Center(
-                          child: Text('Could not load messages.'),
-                        );
-                      }
-                      if (snapshot.connectionState == ConnectionState.waiting) {
-                        return const Center(
-                          child: CircularProgressIndicator(color: gold),
-                        );
-                      }
-                      final messages = snapshot.data?.docs ?? [];
-                      if (messages.isEmpty) {
-                        return const Center(
-                          child: Text(
-                            'Say hello! Start your conversation.',
-                            style: TextStyle(color: Colors.white54),
-                          ),
-                        );
-                      }
-                      return ListView.builder(
-                        padding: const EdgeInsets.all(15),
-                        itemCount: messages.length,
-                        itemBuilder: (context, index) {
-                          final data = messages[index].data();
-                          return ChatMessageBubble(
-                            data: data,
-                            mine: data['senderId'] == auth.currentUser!.uid,
-                          );
-                        },
-                      );
-                    },
-                  ),
-                ),
-                ChatComposer(
-                  chatId: widget.chatId,
-                  disabled: partnerLeft || leaving,
-                ),
-                Container(
-                  color: panel,
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed:
-                              leaving ? null : () => _closeChat(next: true),
-                          icon: const Icon(Icons.skip_next),
-                          label: const Text('NEXT'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: gold,
-                            side: const BorderSide(color: gold),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed:
-                              leaving ? null : () => _closeChat(next: false),
-                          icon: const Icon(Icons.stop),
-                          label: const Text('STOP'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: gold,
-                            foregroundColor: Colors.black,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            );
-          },
         ),
       ),
     );
   }
 }
 
-// FRIENDS AND INVITES
+// CHAT IMAGE
+
+class ChatImage extends StatelessWidget {
+  final String url;
+
+  const ChatImage({super.key, required this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => Scaffold(
+              backgroundColor: Colors.black,
+              appBar: AppBar(backgroundColor: Colors.black),
+              body: Center(
+                child: InteractiveViewer(
+                  child: Image.network(url),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.network(
+          url,
+          width: 220,
+          height: 220,
+          fit: BoxFit.cover,
+          loadingBuilder: (context, child, progress) {
+            if (progress == null) return child;
+            return const SizedBox(
+              width: 220,
+              height: 180,
+              child: Center(
+                child: CircularProgressIndicator(color: gold),
+              ),
+            );
+          },
+          errorBuilder: (_, __, ___) => const SizedBox(
+            width: 200,
+            height: 100,
+            child: Center(
+              child: Text(
+                'Image unavailable',
+                style: TextStyle(color: Colors.white54),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// CHAT AUDIO
+
+class ChatAudio extends StatefulWidget {
+  final String url;
+
+  const ChatAudio({super.key, required this.url});
+
+  @override
+  State<ChatAudio> createState() => _ChatAudioState();
+}
+
+class _ChatAudioState extends State<ChatAudio> {
+  final AudioPlayer player = AudioPlayer();
+  bool playing = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    player.onPlayerStateChanged.listen((state) {
+      if (mounted) {
+        setState(() {
+          playing = state == PlayerState.playing;
+        });
+      }
+    });
+  }
+
+  Future<void> toggleAudio() async {
+    try {
+      if (playing) {
+        await player.pause();
+      } else {
+        await player.play(UrlSource(widget.url));
+      }
+    } catch (e) {
+      debugPrint('Audio playback error: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    player.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          onPressed: toggleAudio,
+          icon: Icon(
+            playing ? Icons.pause_circle : Icons.play_circle,
+            color: gold,
+            size: 35,
+          ),
+        ),
+        const Text(
+          'Voice message',
+          style: TextStyle(color: Colors.white),
+        ),
+      ],
+    );
+  }
+}
+
+// CHAT COMPOSER
+
+class ChatComposer extends StatefulWidget {
+  final String chatId;
+
+  const ChatComposer({super.key, required this.chatId});
+
+  @override
+  State<ChatComposer> createState() => _ChatComposerState();
+}
+
+class _ChatComposerState extends State<ChatComposer> {
+  final controller = TextEditingController();
+  final recorder = AudioRecorder();
+  final picker = ImagePicker();
+
+  bool recording = false;
+  bool sending = false;
+
+  CollectionReference<Map<String, dynamic>> get messagesRef =>
+      db.collection('chats').doc(widget.chatId).collection('messages');
+
+  Future<void> sendText() async {
+    final text = controller.text.trim();
+    if (text.isEmpty || sending) return;
+
+    controller.clear();
+    setState(() => sending = true);
+
+    try {
+      await messagesRef.add({
+        'senderId': auth.currentUser!.uid,
+        'text': text,
+        'type': 'text',
+        'createdAt': FieldValue.serverTimestamp(),
+        'expiresAt': messageExpiry(),
+        'seen': false,
+      });
+    } catch (e) {
+      debugPrint('Message send error: $e');
+    } finally {
+      if (mounted) setState(() => sending = false);
+    }
+  }
+
+  Future<void> sendImage() async {
+    if (sending) return;
+
+    try {
+      final image = await picker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 75,
+      );
+
+      if (image == null) return;
+
+      setState(() => sending = true);
+
+      final file = File(image.path);
+      final path =
+          '${widget.chatId}/${DateTime.now().millisecondsSinceEpoch}_${auth.currentUser!.uid}.jpg';
+
+      await supabase.storage.from(mediaBucket).upload(
+            path,
+            file,
+            fileOptions: const FileOptions(
+              contentType: 'image/jpeg',
+              upsert: false,
+            ),
+          );
+
+      final url = supabase.storage.from(mediaBucket).getPublicUrl(path);
+
+      await messagesRef.add({
+        'senderId': auth.currentUser!.uid,
+        'type': 'image',
+        'url': url,
+        'storagePath': path,
+        'createdAt': FieldValue.serverTimestamp(),
+        'expiresAt': messageExpiry(),
+        'seen': false,
+      });
+    } catch (e) {
+      debugPrint('Image send error: $e');
+    } finally {
+      if (mounted) setState(() => sending = false);
+    }
+  }
+
+  Future<void> startRecording() async {
+    try {
+      if (!await recorder.hasPermission()) return;
+
+      final directory = Directory.systemTemp;
+      final path =
+          '${directory.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+
+      await recorder.start(
+        const RecordConfig(encoder: AudioEncoder.aacLc),
+        path: path,
+      );
+
+      if (mounted) setState(() => recording = true);
+    } catch (e) {
+      debugPrint('Recording start error: $e');
+    }
+  }
+
+  Future<void> stopAndSendRecording() async {
+    try {
+      final path = await recorder.stop();
+
+      if (mounted) setState(() => recording = false);
+      if (path == null) return;
+
+      setState(() => sending = true);
+
+      final file = File(path);
+      final storagePath =
+          '${widget.chatId}/voice_${DateTime.now().millisecondsSinceEpoch}_${auth.currentUser!.uid}.m4a';
+
+      await supabase.storage.from(mediaBucket).upload(
+            storagePath,
+            file,
+            fileOptions: const FileOptions(
+              contentType: 'audio/mp4',
+              upsert: false,
+            ),
+          );
+
+      final url =
+          supabase.storage.from(mediaBucket).getPublicUrl(storagePath);
+
+      await messagesRef.add({
+        'senderId': auth.currentUser!.uid,
+        'type': 'audio',
+        'url': url,
+        'storagePath': storagePath,
+        'createdAt': FieldValue.serverTimestamp(),
+        'expiresAt': messageExpiry(),
+        'seen': false,
+      });
+    } catch (e) {
+      debugPrint('Voice message error: $e');
+    } finally {
+      if (mounted) setState(() => sending = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    recorder.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+        decoration: const BoxDecoration(
+          color: panel,
+          border: Border(top: BorderSide(color: Colors.white12)),
+        ),
+        child: Row(
+          children: [
+            IconButton(
+              onPressed: sending ? null : sendImage,
+              icon: const Icon(Icons.image_outlined, color: gold),
+            ),
+            Expanded(
+              child: TextField(
+                controller: controller,
+                minLines: 1,
+                maxLines: 4,
+                decoration: InputDecoration(
+                  hintText: 'Type a message...',
+                  filled: true,
+                  fillColor: bg,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 15,
+                    vertical: 10,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(25),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+                onSubmitted: (_) => sendText(),
+              ),
+            ),
+            if (recording)
+              IconButton(
+                onPressed: sending ? null : stopAndSendRecording,
+                icon: const Icon(Icons.stop_circle, color: Colors.red),
+              )
+            else
+              IconButton(
+                onPressed: sending ? null : startRecording,
+                icon: const Icon(Icons.mic, color: gold),
+              ),
+            IconButton(
+              onPressed: sending ? null : sendText,
+              icon: const Icon(Icons.send, color: gold),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// PART 2 END
+//// FRIENDS SCREEN
 
 class FriendsScreen extends StatefulWidget {
   const FriendsScreen({super.key});
@@ -1732,161 +1425,109 @@ class FriendsScreen extends StatefulWidget {
 }
 
 class _FriendsScreenState extends State<FriendsScreen> {
-  final codeController = TextEditingController();
+  final inviteController = TextEditingController();
   bool loading = false;
-  String message = '';
 
-  String get myUid => auth.currentUser!.uid;
+  String get uid => auth.currentUser!.uid;
+
+  String friendshipId(String a, String b) {
+    final ids = [a, b]..sort();
+    return '${ids[0]}_${ids[1]}';
+  }
 
   Future<void> createInvite() async {
-    if (loading) return;
-    setState(() {
-      loading = true;
-      message = '';
-    });
-
     try {
-      final profile = await db.collection('users').doc(myUid).get();
-      final name = profile.data()?['name']?.toString() ?? 'Member';
-      final inviteRef = db.collection('friendInvites').doc();
+      setState(() => loading = true);
 
-      await inviteRef.set({
-        'inviterUid': myUid,
-        'inviterName': name,
-        'status': 'pending',
+      final ref = db.collection('friendInvites').doc();
+
+      await ref.set({
+        'inviterUid': uid,
         'createdAt': FieldValue.serverTimestamp(),
+        'used': false,
       });
 
-      await Clipboard.setData(ClipboardData(text: inviteRef.id));
-      if (!mounted) return;
+      await Clipboard.setData(ClipboardData(text: ref.id));
 
-      showDialog(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          backgroundColor: panel,
-          title: const Text('Friend Invite Created'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('Share this invite code with your friend.'),
-              const SizedBox(height: 15),
-              SelectableText(
-                inviteRef.id,
-                style: const TextStyle(
-                  color: gold,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 10),
-              const Text(
-                'Code copied to clipboard!',
-                style: TextStyle(color: Colors.white54),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('DONE'),
-            ),
-          ],
-        ),
-      );
-    } catch (_) {
       if (mounted) {
-        setState(() => message = 'Could not create invite. Try again.');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Invite code copied! Share it with your friend.'),
+          ),
+        );
       }
+    } catch (e) {
+      debugPrint('Invite creation error: $e');
     } finally {
       if (mounted) setState(() => loading = false);
     }
   }
 
-  Future<void> joinWithCode() async {
-    final code = codeController.text.trim();
-    if (code.isEmpty || loading) {
-      setState(() => message = 'Please enter an invite code.');
-      return;
-    }
+  Future<void> acceptInvite() async {
+    final code = inviteController.text.trim();
 
-    setState(() {
-      loading = true;
-      message = '';
-    });
+    if (code.isEmpty || loading) return;
+
+    setState(() => loading = true);
 
     try {
       final inviteRef = db.collection('friendInvites').doc(code);
       final inviteSnapshot = await inviteRef.get();
-      if (!inviteSnapshot.exists) throw Exception('Invalid invite code.');
+
+      if (!inviteSnapshot.exists) {
+        throw Exception('Invalid invite code.');
+      }
 
       final inviteData = inviteSnapshot.data()!;
-      final inviterUid = inviteData['inviterUid']?.toString() ?? '';
-      if (inviteData['status'] != 'pending') {
+      final inviterUid = inviteData['inviterUid'] as String?;
+
+      if (inviterUid == null || inviterUid == uid) {
+        throw Exception('This invite code cannot be used.');
+      }
+
+      if (inviteData['used'] == true) {
         throw Exception('This invite has already been used.');
       }
-      if (inviterUid == myUid) {
-        throw Exception('You cannot use your own invite code.');
-      }
 
-      final myProfile = await db.collection('users').doc(myUid).get();
-      final myName = myProfile.data()?['name']?.toString() ?? 'Member';
-      final inviterName = inviteData['inviterName']?.toString() ?? 'Friend';
-
-      final friendshipId = '${inviterUid}_$myUid';
-      final friendshipRef = db.collection('friendships').doc(friendshipId);
-      final chatRef = db.collection('chats').doc(friendshipId);
+      final friendship = friendshipId(uid, inviterUid);
+      final friendshipRef =
+          db.collection('friendships').doc(friendship);
 
       await db.runTransaction((transaction) async {
-        final currentInvite = await transaction.get(inviteRef);
-        final existingFriendship = await transaction.get(friendshipRef);
-        final existingChat = await transaction.get(chatRef);
+        final latestInvite = await transaction.get(inviteRef);
+        final latestFriendship = await transaction.get(friendshipRef);
 
-        if (!currentInvite.exists ||
-            currentInvite.data()?['status'] != 'pending') {
+        if (!latestInvite.exists ||
+            latestInvite.data()?['used'] == true) {
           throw Exception('Invite is no longer available.');
         }
-        if (existingFriendship.exists || existingChat.exists) {
-          throw Exception('This friendship already exists.');
+
+        if (!latestFriendship.exists) {
+          transaction.set(friendshipRef, {
+            'members': [uid, inviterUid],
+            'createdAt': FieldValue.serverTimestamp(),
+          });
         }
 
         transaction.update(inviteRef, {
-          'status': 'accepted',
-          'acceptedBy': myUid,
-          'acceptedName': myName,
-          'acceptedAt': FieldValue.serverTimestamp(),
-          'friendshipId': friendshipId,
-        });
-
-        transaction.set(friendshipRef, {
-          'participants': [inviterUid, myUid],
-          'uidA': inviterUid,
-          'uidB': myUid,
-          'nameA': inviterName,
-          'nameB': myName,
-          'inviteId': code,
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-
-        transaction.set(chatRef, {
-          'type': 'friend',
-          'inviteId': code,
-          'participants': [inviterUid, myUid],
-          'active': true,
-          'createdAt': FieldValue.serverTimestamp(),
-          'lastMessage': '',
-          'lastMessageAt': FieldValue.serverTimestamp(),
+          'used': true,
+          'usedBy': uid,
+          'usedAt': FieldValue.serverTimestamp(),
         });
       });
 
-      codeController.clear();
+      inviteController.clear();
+
       if (mounted) {
-        setState(() => message = 'Friend connected successfully!');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Friend added successfully!')),
+        );
       }
     } catch (e) {
       if (mounted) {
-        setState(() {
-          message = e.toString().replaceFirst('Exception: ', '');
-        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
       }
     } finally {
       if (mounted) setState(() => loading = false);
@@ -1895,14 +1536,13 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
   @override
   void dispose() {
-    codeController.dispose();
+    inviteController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('CHAT WITH FRIENDS')),
       body: ListView(
         padding: const EdgeInsets.all(18),
         children: [
@@ -1910,164 +1550,144 @@ class _FriendsScreenState extends State<FriendsScreen> {
             padding: const EdgeInsets.all(20),
             decoration: BoxDecoration(
               color: panel,
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(20),
               border: Border.all(color: gold.withOpacity(.35)),
             ),
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.people_alt, color: gold, size: 48),
+                const Icon(Icons.person_add_alt_1, color: gold, size: 35),
                 const SizedBox(height: 12),
                 const Text(
-                  'YOUR FRIEND CIRCLE',
+                  'INVITE YOUR FRIENDS',
                   style: TextStyle(
                     color: gold,
-                    fontSize: 20,
                     fontWeight: FontWeight.bold,
+                    fontSize: 18,
                   ),
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Invite someone and enjoy private conversations.',
-                  textAlign: TextAlign.center,
+                  'Create an invite code and share it with your friend.',
                   style: TextStyle(color: Colors.white70),
                 ),
-                const SizedBox(height: 18),
+                const SizedBox(height: 15),
                 SizedBox(
                   width: double.infinity,
-                  child: ElevatedButton.icon(
+                  child: ElevatedButton(
                     onPressed: loading ? null : createInvite,
-                    icon: const Icon(Icons.person_add),
-                    label: const Text('CREATE INVITE CODE'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: gold,
                       foregroundColor: Colors.black,
-                      padding: const EdgeInsets.all(14),
                     ),
+                    child: const Text('CREATE INVITE CODE'),
+                  ),
+                ),
+                const Divider(height: 30, color: Colors.white24),
+                const Text(
+                  'HAVE AN INVITE CODE?',
+                  style: TextStyle(color: gold, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: inviteController,
+                  decoration: const InputDecoration(
+                    hintText: 'Enter invite code',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: loading ? null : acceptInvite,
+                    child: const Text('ADD FRIEND'),
                   ),
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 22),
-          const Text(
-            'JOIN WITH INVITE CODE',
-            style: TextStyle(color: gold, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 10),
-          TextField(
-            controller: codeController,
-            decoration: const InputDecoration(
-              hintText: 'Enter your friend invite code',
-              border: OutlineInputBorder(),
-              prefixIcon: Icon(Icons.vpn_key),
-            ),
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton(
-              onPressed: loading ? null : joinWithCode,
-              style: OutlinedButton.styleFrom(
-                foregroundColor: gold,
-                side: const BorderSide(color: gold),
-                padding: const EdgeInsets.all(14),
-              ),
-              child: loading
-                  ? const CircularProgressIndicator(color: gold)
-                  : const Text('JOIN FRIEND'),
-            ),
-          ),
-          if (message.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: gold),
-            ),
-          ],
           const SizedBox(height: 25),
           const Text(
-            'MY FRIENDS',
+            'YOUR FRIENDS',
             style: TextStyle(
               color: gold,
               fontWeight: FontWeight.bold,
               fontSize: 17,
             ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 12),
           StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
             stream: db
                 .collection('friendships')
-                .where('participants', arrayContains: myUid)
+                .where('members', arrayContains: uid)
                 .snapshots(),
             builder: (context, snapshot) {
-              if (snapshot.hasError) {
-                return const Text(
-                  'Could not load friends.',
-                  style: TextStyle(color: Colors.white54),
-                );
-              }
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return const Center(
                   child: CircularProgressIndicator(color: gold),
                 );
               }
 
-              final friends = snapshot.data?.docs ?? [];
-              if (friends.isEmpty) {
-                return const _EmptyState(
-                  icon: Icons.people_outline,
-                  title: 'No friends yet',
-                  subtitle: 'Create an invite code to connect with someone.',
+              final friendships = snapshot.data?.docs ?? [];
+
+              if (friendships.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.all(25),
+                  child: Center(
+                    child: Text(
+                      'No friends yet. Invite someone to get started!',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                  ),
                 );
               }
 
               return Column(
-                children: friends.map((friend) {
-                  final participants =
-                      List<String>.from(friend.data()['participants'] ?? []);
-                  final otherUid = participants.firstWhere(
-                    (uid) => uid != myUid,
+                children: friendships.map((friendship) {
+                  final members =
+                      List<String>.from(friendship.data()['members'] ?? []);
+                  final partnerUid = members.firstWhere(
+                    (id) => id != uid,
                     orElse: () => '',
                   );
-                  if (otherUid.isEmpty) return const SizedBox.shrink();
 
-                  return FutureBuilder<
-                      DocumentSnapshot<Map<String, dynamic>>>(
-                    future: db.collection('users').doc(otherUid).get(),
+                  if (partnerUid.isEmpty) {
+                    return const SizedBox.shrink();
+                  }
+
+                  return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                    future: db.collection('users').doc(partnerUid).get(),
                     builder: (context, userSnapshot) {
-                      final friendName = userSnapshot.data?.data()?['name']
-                              ?.toString() ??
-                          'Friend';
+                      final userData = userSnapshot.data?.data() ?? {};
+                      final name = userData['name'] ?? 'Friend';
+
                       return Card(
                         color: panel,
                         child: ListTile(
-                          leading: const CircleAvatar(
-                            backgroundColor: Color(0xFF302719),
-                            child: Icon(Icons.person, color: gold),
+                          leading: CircleAvatar(
+                            backgroundColor: gold.withOpacity(.2),
+                            child: const Icon(Icons.person, color: gold),
                           ),
-                          title: Text(
-                            friendName,
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          subtitle: const Text(
-                            'Private friend chat',
-                            style: TextStyle(color: Colors.white54),
-                          ),
+                          title: Text(name.toString()),
+                          subtitle: const Text('Tap to start chatting'),
                           trailing: const Icon(
                             Icons.chat_bubble_outline,
                             color: gold,
                           ),
-                          onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => FriendChatScreen(
-                                chatId: friend.id,
-                                partnerUid: otherUid,
-                                partnerName: friendName,
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => FriendChatScreen(
+                                  chatId: friendship.id,
+                                  partnerUid: partnerUid,
+                                  partnerName: name.toString(),
+                                ),
                               ),
-                            ),
-                          ),
+                            );
+                          },
                         ),
                       );
                     },
@@ -2084,7 +1704,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
 // FRIEND CHAT
 
-class FriendChatScreen extends StatelessWidget {
+class FriendChatScreen extends StatefulWidget {
   final String chatId;
   final String partnerUid;
   final String partnerName;
@@ -2097,204 +1717,190 @@ class FriendChatScreen extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final messagesRef =
-        db.collection('chats').doc(chatId).collection('messages');
+  State<FriendChatScreen> createState() => _FriendChatScreenState();
+}
 
+class _FriendChatScreenState extends State<FriendChatScreen> {
+  Timer? cleanupTimer;
+  Timer? refreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+
+    cleanupExpiredMessages(widget.chatId);
+
+    cleanupTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => cleanupExpiredMessages(widget.chatId),
+    );
+
+    refreshTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) {
+        if (mounted) setState(() {});
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    cleanupTimer?.cancel();
+    refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              partnerName,
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const Text(
-              'Friend • Private chat',
-              style: TextStyle(fontSize: 11, color: Colors.white54),
-            ),
-          ],
-        ),
+        title: Text(widget.partnerName),
       ),
       body: Column(
         children: [
           Expanded(
             child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-              stream: messagesRef.orderBy('createdAt').snapshots(),
+              stream: db
+                  .collection('chats')
+                  .doc(widget.chatId)
+                  .collection('messages')
+                  .orderBy('createdAt', descending: true)
+                  .snapshots(),
               builder: (context, snapshot) {
-                if (snapshot.hasError) {
-                  return const Center(
-                    child: Text('Could not load messages.'),
-                  );
-                }
                 if (snapshot.connectionState == ConnectionState.waiting) {
                   return const Center(
                     child: CircularProgressIndicator(color: gold),
                   );
                 }
 
-                final messages = snapshot.data?.docs ?? [];
+                final messages = (snapshot.data?.docs ?? [])
+                    .where((doc) => !isMessageExpired(doc.data()))
+                    .toList();
+
                 if (messages.isEmpty) {
                   return const Center(
                     child: Text(
-                      'Say hello to your friend!',
+                      'Start a conversation with your friend!',
                       style: TextStyle(color: Colors.white54),
                     ),
                   );
                 }
 
                 return ListView.builder(
-                  padding: const EdgeInsets.all(15),
+                  reverse: true,
+                  padding: const EdgeInsets.all(12),
                   itemCount: messages.length,
                   itemBuilder: (context, index) {
-                    final data = messages[index].data();
+                    final message = messages[index];
+                    final data = message.data();
+                    final mine =
+                        data['senderId'] == auth.currentUser!.uid;
+
                     return ChatMessageBubble(
                       data: data,
-                      mine: data['senderId'] == auth.currentUser!.uid,
+                      mine: mine,
+                      messageRef: message.reference,
                     );
                   },
                 );
               },
             ),
           ),
-          ChatComposer(chatId: chatId),
+          ChatComposer(chatId: widget.chatId),
         ],
       ),
     );
   }
 }
 
-// PREMIUM AND GENDER FILTER
+// PREMIUM SCREEN
 
 class PremiumScreen extends StatelessWidget {
   const PremiumScreen({super.key});
 
-  Future<void> savePreference(
-    BuildContext context,
-    String preference,
-  ) async {
-    try {
-      await db.collection('users').doc(auth.currentUser!.uid).set({
-        'preferredGender': preference,
-      }, SetOptions(merge: true));
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Gender preference saved.')),
-        );
-      }
-    } catch (_) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not save preference.')),
-        );
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
-    final user = auth.currentUser!;
+    final uid = auth.currentUser!.uid;
+
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: db.collection('users').doc(user.uid).snapshots(),
+      stream: db.collection('users').doc(uid).snapshots(),
       builder: (context, snapshot) {
         final data = snapshot.data?.data();
-        final premium = isPremiumActive(data);
-        final preference = data?['preferredGender']?.toString() ?? 'Both';
+        final active = isPremiumActive(data);
 
         return ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            const Icon(Icons.workspace_premium_rounded, color: gold, size: 58),
-            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(25),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(24),
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF3B1550), Color(0xFF160B20)],
+                ),
+                border: Border.all(color: gold.withOpacity(.5)),
+              ),
+              child: Column(
+                children: [
+                  const Icon(
+                    Icons.workspace_premium,
+                    color: gold,
+                    size: 65,
+                  ),
+                  const SizedBox(height: 15),
+                  const Text(
+                    'STRENZO PREMIUM',
+                    style: TextStyle(
+                      color: gold,
+                      fontSize: 23,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    active ? 'YOUR PREMIUM IS ACTIVE' : 'UPGRADE YOUR EXPERIENCE',
+                    style: const TextStyle(color: Colors.white70),
+                  ),
+                  const SizedBox(height: 15),
+                  if (active)
+                    Text(
+                      premiumRemaining(data),
+                      style: const TextStyle(color: gold, fontSize: 16),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 25),
             const Text(
-              'GO PREMIUM',
-              textAlign: TextAlign.center,
+              'PREMIUM FEATURES',
               style: TextStyle(
                 color: gold,
-                fontSize: 27,
-                fontWeight: FontWeight.w900,
+                fontWeight: FontWeight.bold,
+                fontSize: 17,
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 15),
+            const _FeatureTile(
+              icon: Icons.filter_alt_outlined,
+              title: 'Gender Filter',
+              subtitle: 'Choose who you want to meet.',
+            ),
+            const _FeatureTile(
+              icon: Icons.star_outline,
+              title: 'Premium Profile',
+              subtitle: 'Show your premium membership.',
+            ),
+            const _FeatureTile(
+              icon: Icons.all_inclusive,
+              title: 'Better Experience',
+              subtitle: 'Enjoy additional app features.',
+            ),
+            const SizedBox(height: 20),
             const Text(
-              'Unlock more ways to connect.',
+              'Premium access is managed by the STRENZO admin team.',
               textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white54),
             ),
-            const SizedBox(height: 20),
-            Card(
-              color: panel,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.workspace_premium, color: gold),
-                        const SizedBox(width: 10),
-                        Text(
-                          premium ? 'PREMIUM ACTIVE' : 'FREE MEMBERSHIP',
-                          style: const TextStyle(
-                            color: gold,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      premium
-                          ? premiumRemaining(data)
-                          : 'Gender filters are available to Premium members.',
-                      style: const TextStyle(color: Colors.white70),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            const Text(
-              'GENDER PREFERENCE FILTER',
-              style: TextStyle(color: gold, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 10),
-            DropdownButtonFormField<String>(
-              value: ['Male', 'Female', 'Both'].contains(preference)
-                  ? preference
-                  : 'Both',
-              decoration: InputDecoration(
-                border: const OutlineInputBorder(),
-                prefixIcon: Icon(
-                  premium ? Icons.people_alt_outlined : Icons.lock_outline,
-                ),
-                helperText: premium
-                    ? 'Choose who you want to meet.'
-                    : 'Upgrade to Premium to unlock this filter.',
-              ),
-              items: const [
-                DropdownMenuItem(value: 'Male', child: Text('Male')),
-                DropdownMenuItem(value: 'Female', child: Text('Female')),
-                DropdownMenuItem(value: 'Both', child: Text('Both')),
-              ],
-              onChanged: premium
-                  ? (value) {
-                      if (value != null) savePreference(context, value);
-                    }
-                  : null,
-            ),
-            if (!premium) ...[
-              const SizedBox(height: 12),
-              const Text(
-                'The gender filter is locked for free accounts.',
-                style: TextStyle(color: Colors.white54),
-              ),
-            ],
-            const SizedBox(height: 25),
-            const _Feature(text: 'Gender preference filters'),
-            const _Feature(text: 'Premium profile badge'),
-            const _Feature(text: 'Priority matching options'),
-            const _Feature(text: 'More profile customisation'),
           ],
         );
       },
@@ -2302,7 +1908,28 @@ class PremiumScreen extends StatelessWidget {
   }
 }
 
-// PROFILE
+class _FeatureTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+
+  const _FeatureTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Icon(icon, color: gold, size: 28),
+      title: Text(title),
+      subtitle: Text(subtitle),
+    );
+  }
+}
+
+// PROFILE SCREEN
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -2310,116 +1937,97 @@ class ProfileScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final user = auth.currentUser!;
+
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: db.collection('users').doc(user.uid).snapshots(),
       builder: (context, snapshot) {
-        final data = snapshot.data?.data();
-        final name =
-            data?['name']?.toString() ?? user.displayName ?? 'New Member';
-        final bio = data?['bio']?.toString() ?? '';
-        final gender = data?['gender']?.toString() ?? '';
+        final data = snapshot.data?.data() ?? {};
+        final name = data['name'] ?? user.displayName ?? 'Member';
+        final email = data['email'] ?? user.email ?? '';
+        final bio = data['bio'] ?? '';
         final premium = isPremiumActive(data);
 
         return ListView(
           padding: const EdgeInsets.all(20),
           children: [
             const SizedBox(height: 15),
-            const CircleAvatar(
+            CircleAvatar(
               radius: 48,
-              backgroundColor: Color(0xFF302719),
-              child: Icon(Icons.person, size: 48, color: gold),
+              backgroundColor: gold.withOpacity(.2),
+              child: const Icon(Icons.person, color: gold, size: 55),
             ),
-            const SizedBox(height: 14),
-            Text(
-              name,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 23,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              user.email ?? 'Google Account',
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white54),
-            ),
-            if (gender.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(
-                gender,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: gold),
-              ),
-            ],
-            if (premium) ...[
-              const SizedBox(height: 8),
-              const Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.workspace_premium, color: gold, size: 18),
-                  SizedBox(width: 5),
-                  Text(
-                    'PREMIUM MEMBER',
-                    style: TextStyle(color: gold, fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-            ],
-            const SizedBox(height: 8),
-            Text(
-              bio.isEmpty ? 'Add a short bio about yourself.' : bio,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white70),
-            ),
-            const SizedBox(height: 25),
-            _ActionTile(
-              icon: Icons.edit,
-              title: 'Edit Profile',
-              subtitle: 'Change your name, gender and bio',
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => EditProfileScreen(
-                    currentName: name,
-                    currentBio: bio,
-                    currentGender: gender,
-                  ),
+            const SizedBox(height: 15),
+            Center(
+              child: Text(
+                name.toString(),
+                style: const TextStyle(
+                  fontSize: 23,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
             ),
-            _ActionTile(
-              icon: Icons.share_rounded,
-              title: 'Owner Socials',
-              subtitle: 'Instagram, Telegram and YouTube',
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const OwnerSocialsScreen()),
+            const SizedBox(height: 5),
+            Center(
+              child: Text(
+                email.toString(),
+                style: const TextStyle(color: Colors.white54),
               ),
             ),
-            _ActionTile(
-              icon: Icons.support_agent_rounded,
-              title: 'Customer Care',
-              subtitle: 'Contact official Telegram support',
-              onTap: () => _openExternal(context, 'https://t.me/ujjwal_jaat01'),
-            ),
-            _ActionTile(
-              icon: Icons.admin_panel_settings_rounded,
-              title: 'Owner Admin Panel',
-              subtitle: 'Restricted owner controls',
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const AdminAccessScreen()),
+            if (premium)
+              const Padding(
+                padding: EdgeInsets.only(top: 10),
+                child: Center(
+                  child: Text(
+                    '★ PREMIUM MEMBER',
+                    style: TextStyle(
+                      color: gold,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
               ),
-            ),
             const SizedBox(height: 15),
+            if (bio.toString().isNotEmpty)
+              Center(
+                child: Text(
+                  bio.toString(),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white70),
+                ),
+              ),
+            const SizedBox(height: 25),
+            _ActionTile(
+              icon: Icons.edit_outlined,
+              title: 'Edit Profile',
+              subtitle: 'Update your name, bio and gender',
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => EditProfileScreen(data: data),
+                  ),
+                );
+              },
+            ),
+            _ActionTile(
+              icon: Icons.admin_panel_settings_outlined,
+              title: 'Admin Panel',
+              subtitle: 'Administrator access',
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const AdminLoginScreen(),
+                  ),
+                );
+              },
+            ),
             _ActionTile(
               icon: Icons.logout,
               title: 'Logout',
               subtitle: 'Sign out of your account',
               onTap: () async {
                 await auth.signOut();
-                await GoogleSignIn().signOut();
               },
             ),
           ],
@@ -2432,15 +2040,11 @@ class ProfileScreen extends StatelessWidget {
 // EDIT PROFILE
 
 class EditProfileScreen extends StatefulWidget {
-  final String currentName;
-  final String currentBio;
-  final String currentGender;
+  final Map<String, dynamic> data;
 
   const EditProfileScreen({
     super.key,
-    required this.currentName,
-    required this.currentBio,
-    required this.currentGender,
+    required this.data,
   });
 
   @override
@@ -2450,57 +2054,53 @@ class EditProfileScreen extends StatefulWidget {
 class _EditProfileScreenState extends State<EditProfileScreen> {
   late final TextEditingController nameController;
   late final TextEditingController bioController;
-  String? gender;
-  bool loading = false;
-  String message = '';
+
+  String gender = 'Other';
+  bool saving = false;
 
   @override
   void initState() {
     super.initState();
-    nameController = TextEditingController(text: widget.currentName);
-    bioController = TextEditingController(text: widget.currentBio);
-    gender = widget.currentGender.isEmpty ? null : widget.currentGender;
+
+    nameController = TextEditingController(
+      text: widget.data['name'] ?? '',
+    );
+
+    bioController = TextEditingController(
+      text: widget.data['bio'] ?? '',
+    );
+
+    gender = widget.data['gender'] ?? 'Other';
   }
 
   Future<void> saveProfile() async {
     final name = nameController.text.trim();
-    final bio = bioController.text.trim();
+
     if (name.isEmpty) {
-      setState(() => message = 'Name cannot be empty.');
-      return;
-    }
-    if (gender == null) {
-      setState(() => message = 'Please select your gender.');
-      return;
-    }
-    if (name.length > 40 || bio.length > 160) {
-      setState(() => message = 'Name or bio is too long.');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter your name.')),
+      );
       return;
     }
 
-    setState(() {
-      loading = true;
-      message = '';
-    });
+    setState(() => saving = true);
 
     try {
       await db.collection('users').doc(auth.currentUser!.uid).set({
         'name': name,
-        'bio': bio,
+        'bio': bioController.text.trim(),
         'gender': gender,
       }, SetOptions(merge: true));
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Profile updated successfully.')),
-      );
-      Navigator.pop(context);
-    } catch (_) {
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
       if (mounted) {
-        setState(() => message = 'Could not update profile. Please try again.');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not save profile: $e')),
+        );
       }
     } finally {
-      if (mounted) setState(() => loading = false);
+      if (mounted) setState(() => saving = false);
     }
   }
 
@@ -2514,63 +2114,56 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('EDIT PROFILE')),
+      appBar: AppBar(title: const Text('Edit Profile')),
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          const CircleAvatar(
-            radius: 42,
-            backgroundColor: Color(0xFF302719),
-            child: Icon(Icons.person, color: gold, size: 42),
-          ),
-          const SizedBox(height: 25),
           TextField(
             controller: nameController,
-            maxLength: 40,
             decoration: const InputDecoration(
-              labelText: 'Your Name',
-              prefixIcon: Icon(Icons.person_outline),
+              labelText: 'Full Name',
               border: OutlineInputBorder(),
             ),
-          ),
-          const SizedBox(height: 15),
-          DropdownButtonFormField<String>(
-            value: gender,
-            decoration: const InputDecoration(
-              labelText: 'Your Gender',
-              prefixIcon: Icon(Icons.wc),
-              border: OutlineInputBorder(),
-            ),
-            items: const [
-              DropdownMenuItem(value: 'Male', child: Text('Male')),
-              DropdownMenuItem(value: 'Female', child: Text('Female')),
-            ],
-            onChanged: (value) => setState(() => gender = value),
           ),
           const SizedBox(height: 15),
           TextField(
             controller: bioController,
-            maxLength: 160,
-            maxLines: 4,
+            maxLines: 3,
             decoration: const InputDecoration(
-              labelText: 'Your Bio',
-              hintText: 'Write something about yourself...',
+              labelText: 'Bio',
               border: OutlineInputBorder(),
             ),
           ),
-          if (message.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Text(message, style: const TextStyle(color: gold)),
+          const SizedBox(height: 20),
+          const Text(
+            'Gender',
+            style: TextStyle(color: gold, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            value: gender,
+            dropdownColor: panel,
+            items: const [
+              DropdownMenuItem(value: 'Male', child: Text('Male')),
+              DropdownMenuItem(value: 'Female', child: Text('Female')),
+              DropdownMenuItem(value: 'Other', child: Text('Other')),
+            ],
+            onChanged: (value) {
+              if (value != null) setState(() => gender = value);
+            },
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
             ),
+          ),
+          const SizedBox(height: 25),
           ElevatedButton(
-            onPressed: loading ? null : saveProfile,
+            onPressed: saving ? null : saveProfile,
             style: ElevatedButton.styleFrom(
               backgroundColor: gold,
               foregroundColor: Colors.black,
-              padding: const EdgeInsets.all(15),
+              padding: const EdgeInsets.all(16),
             ),
-            child: loading
+            child: saving
                 ? const CircularProgressIndicator(color: Colors.black)
                 : const Text('SAVE PROFILE'),
           ),
@@ -2580,132 +2173,58 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   }
 }
 
-// EXTERNAL LINKS
-
-Future<void> _openExternal(BuildContext context, String value) async {
-  final uri = Uri.parse(value);
-  if (!await launchUrl(uri, mode: LaunchMode.externalApplication) &&
-      context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Could not open this link.')),
-    );
-  }
-}
-
-// OWNER SOCIALS
-
-class OwnerSocialsScreen extends StatelessWidget {
-  const OwnerSocialsScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('OWNER SOCIALS')),
-        body: ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            _ActionTile(
-              icon: Icons.camera_alt,
-              title: 'Instagram',
-              subtitle: '@ud_dramas',
-              onTap: () => _openExternal(
-                context,
-                'https://www.instagram.com/ud_dramas?srtk=MWszOXFhNXplZHYxcA==',
-              ),
-            ),
-            _ActionTile(
-              icon: Icons.send,
-              title: 'Telegram',
-              subtitle: '@ujjwalmoder',
-              onTap: () => _openExternal(context, 'https://t.me/ujjwalmoder'),
-            ),
-            _ActionTile(
-              icon: Icons.play_circle_fill,
-              title: 'YouTube',
-              subtitle: '@Datingguru01',
-              onTap: () => _openExternal(
-                context,
-                'https://www.youtube.com/@Datingguru01',
-              ),
-            ),
-            _ActionTile(
-              icon: Icons.support_agent,
-              title: 'Telegram Support',
-              subtitle: '@ujjwal_jaat01',
-              onTap: () => _openExternal(
-                context,
-                'https://t.me/ujjwal_jaat01',
-              ),
-            ),
-          ],
-        ),
-      );
-}
-
 // ADMIN LOGIN
 
-class AdminAccessScreen extends StatefulWidget {
-  const AdminAccessScreen({super.key});
+class AdminLoginScreen extends StatefulWidget {
+  const AdminLoginScreen({super.key});
 
   @override
-  State<AdminAccessScreen> createState() => _AdminAccessScreenState();
+  State<AdminLoginScreen> createState() => _AdminLoginScreenState();
 }
 
-class _AdminAccessScreenState extends State<AdminAccessScreen> {
+class _AdminLoginScreenState extends State<AdminLoginScreen> {
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
-  bool isRegister = false;
+
   bool loading = false;
-  String message = '';
+  String error = '';
 
-  Future<void> submit() async {
-    final email = emailController.text.trim();
-    final password = passwordController.text;
-    if (email.isEmpty || password.length < 6) {
-      setState(() {
-        message = 'Enter a valid email and password (minimum 6 characters).';
-      });
-      return;
-    }
-
+  Future<void> loginAdmin() async {
     setState(() {
       loading = true;
-      message = '';
+      error = '';
     });
 
     try {
-      UserCredential credential;
-      if (isRegister) {
-        credential = await auth.createUserWithEmailAndPassword(
-          email: email,
-          password: password,
-        );
-      } else {
-        credential = await auth.signInWithEmailAndPassword(
-          email: email,
-          password: password,
-        );
-      }
+      final credential = await auth.signInWithEmailAndPassword(
+        email: emailController.text.trim(),
+        password: passwordController.text,
+      );
 
-      final user = credential.user!;
-      final adminDoc = await db.collection('admins').doc(user.uid).get();
+      final userDoc =
+          await db.collection('users').doc(credential.user!.uid).get();
+
+      if (userDoc.data()?['role'] != 'admin') {
+        await auth.signOut();
+        throw Exception('You do not have administrator access.');
+      }
 
       if (!mounted) return;
-      if (adminDoc.exists && adminDoc.data()?['role'] == 'admin') {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const AdminDashboardScreen()),
-        );
-      } else {
-        setState(() {
-          message = isRegister
-              ? 'Account created. Owner approval is still required.'
-              : 'This account is not approved as an admin.';
-        });
-      }
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => const AdminDashboardScreen(),
+        ),
+      );
     } on FirebaseAuthException catch (e) {
-      if (mounted) setState(() => message = e.message ?? 'Login failed.');
-    } catch (_) {
-      if (mounted) setState(() => message = 'Something went wrong.');
+      if (mounted) {
+        setState(() => error = e.message ?? 'Admin login failed.');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => error = e.toString().replaceFirst('Exception: ', ''));
+      }
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -2719,88 +2238,69 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('OWNER ADMIN LOGIN')),
-        body: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              children: [
-                const Icon(
-                  Icons.admin_panel_settings,
-                  color: gold,
-                  size: 68,
-                ),
-                const SizedBox(height: 18),
-                Text(
-                  isRegister ? 'CREATE OWNER ACCOUNT' : 'OWNER LOGIN',
-                  style: const TextStyle(
-                    color: gold,
-                    fontWeight: FontWeight.w900,
-                    fontSize: 22,
-                  ),
-                ),
-                const SizedBox(height: 24),
-                TextField(
-                  controller: emailController,
-                  keyboardType: TextInputType.emailAddress,
-                  decoration: const InputDecoration(
-                    labelText: 'Admin Email',
-                    prefixIcon: Icon(Icons.email_outlined),
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                TextField(
-                  controller: passwordController,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Password',
-                    prefixIcon: Icon(Icons.lock_outline),
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 18),
-                if (message.isNotEmpty)
-                  Text(
-                    message,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: gold),
-                  ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: gold,
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.all(15),
-                    ),
-                    onPressed: loading ? null : submit,
-                    child: loading
-                        ? const CircularProgressIndicator(color: Colors.black)
-                        : Text(isRegister ? 'CREATE ACCOUNT' : 'LOGIN'),
-                  ),
-                ),
-                TextButton(
-                  onPressed: loading
-                      ? null
-                      : () => setState(() {
-                            isRegister = !isRegister;
-                            message = '';
-                          }),
-                  child: Text(
-                    isRegister
-                        ? 'Already registered? Login'
-                        : 'First time? Create account',
-                    style: const TextStyle(color: gold),
-                  ),
-                ),
-              ],
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Admin Login')),
+      body: ListView(
+        padding: const EdgeInsets.all(22),
+        children: [
+          const Icon(
+            Icons.admin_panel_settings,
+            color: gold,
+            size: 75,
+          ),
+          const SizedBox(height: 20),
+          const Text(
+            'ADMINISTRATOR',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: gold,
+              fontSize: 22,
+              fontWeight: FontWeight.w900,
             ),
           ),
-        ),
-      );
+          const SizedBox(height: 25),
+          TextField(
+            controller: emailController,
+            keyboardType: TextInputType.emailAddress,
+            decoration: const InputDecoration(
+              labelText: 'Admin Email',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 15),
+          TextField(
+            controller: passwordController,
+            obscureText: true,
+            decoration: const InputDecoration(
+              labelText: 'Password',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          if (error.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 15),
+              child: Text(
+                error,
+                style: const TextStyle(color: Colors.redAccent),
+              ),
+            ),
+          const SizedBox(height: 20),
+          ElevatedButton(
+            onPressed: loading ? null : loginAdmin,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: gold,
+              foregroundColor: Colors.black,
+              padding: const EdgeInsets.all(16),
+            ),
+            child: loading
+                ? const CircularProgressIndicator(color: Colors.black)
+                : const Text('ADMIN LOGIN'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 // ADMIN DASHBOARD
@@ -2808,352 +2308,236 @@ class _AdminAccessScreenState extends State<AdminAccessScreen> {
 class AdminDashboardScreen extends StatelessWidget {
   const AdminDashboardScreen({super.key});
 
-  @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(
-          title: const Text('OWNER DASHBOARD'),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.logout),
-              onPressed: () async {
-                await auth.signOut();
-                if (context.mounted) Navigator.pop(context);
-              },
-            ),
-          ],
-        ),
-        body: ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            const Icon(Icons.verified_user, color: gold, size: 65),
-            const SizedBox(height: 15),
-            const Text(
-              'Welcome, Owner Admin',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: gold,
-                fontSize: 23,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 25),
-            _ActionTile(
-              icon: Icons.manage_accounts,
-              title: 'User Management',
-              subtitle: 'View, ban and unban users',
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const UserManagementScreen(),
-                ),
-              ),
-            ),
-            _ActionTile(
-              icon: Icons.workspace_premium,
-              title: 'Premium Management',
-              subtitle: 'Give Premium for 1, 7 or 30 days',
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const UserManagementScreen(),
-                ),
-              ),
-            ),
-            const SizedBox(height: 15),
-            const _Feature(text: 'Reports and broadcasts'),
-            const _Feature(text: 'App analytics'),
-            const SizedBox(height: 15),
-            const Text(
-              'User Management and Premium controls are connected '
-              'to the Firestore users collection.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white54),
-            ),
-          ],
-        ),
-      );
-}
-
-// USER MANAGEMENT AND PREMIUM
-
-class UserManagementScreen extends StatelessWidget {
-  const UserManagementScreen({super.key});
-
-  Future<void> _changeUserStatus(
+  Future<void> updatePremium(
     BuildContext context,
-    String userId,
-    String field,
-    bool value,
-  ) async {
-    try {
-      await db.collection('users').doc(userId).set(
-        {field: value},
-        SetOptions(merge: true),
-      );
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              field == 'isBanned'
-                  ? (value ? 'User banned.' : 'User unbanned.')
-                  : (value ? 'Premium activated.' : 'Premium deactivated.'),
-            ),
-          ),
-        );
-      }
-    } catch (_) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Action failed.')),
-        );
-      }
-    }
-  }
-
-  Future<void> _setPremium(
-    BuildContext context,
-    String userId,
+    String uid,
     int days,
   ) async {
-    try {
-      final expiry = DateTime.now().add(Duration(days: days));
-      await db.collection('users').doc(userId).set({
-        'isPremium': true,
-        'premiumExpiresAt': Timestamp.fromDate(expiry),
-      }, SetOptions(merge: true));
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Premium activated for $days day(s).')),
-        );
-      }
-    } catch (_) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not activate Premium.')),
-        );
-      }
+    final expiry = Timestamp.fromDate(
+      DateTime.now().add(Duration(days: days)),
+    );
+
+    await db.collection('users').doc(uid).set({
+      'isPremium': true,
+      'premiumExpiresAt': expiry,
+    }, SetOptions(merge: true));
+
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Premium activated for $days days.')),
+      );
     }
   }
 
-  Future<void> _removePremium(
+  Future<void> removePremium(String uid) async {
+    await db.collection('users').doc(uid).set({
+      'isPremium': false,
+      'premiumExpiresAt': FieldValue.delete(),
+    }, SetOptions(merge: true));
+  }
+
+  Future<void> toggleBan(
     BuildContext context,
-    String userId,
+    String uid,
+    bool currentlyBanned,
   ) async {
-    try {
-      await db.collection('users').doc(userId).set({
-        'isPremium': false,
-        'premiumExpiresAt': FieldValue.delete(),
-      }, SetOptions(merge: true));
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Premium deactivated.')),
-        );
-      }
-    } catch (_) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not deactivate Premium.')),
-        );
-      }
+    await db.collection('users').doc(uid).set({
+      'isBanned': !currentlyBanned,
+    }, SetOptions(merge: true));
+
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            currentlyBanned ? 'User unbanned.' : 'User banned.',
+          ),
+        ),
+      );
     }
   }
 
-  Future<void> _showPremiumOptions(
+  void showUserOptions(
     BuildContext context,
-    String userId,
-  ) async {
-    await showDialog(
+    String uid,
+    Map<String, dynamic> data,
+  ) {
+    showModalBottomSheet(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: panel,
-        title: const Text('Give Premium'),
-        content: const Text('Select Premium duration.'),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(dialogContext);
-              _setPremium(context, userId, 1);
-            },
-            child: const Text('1 Day'),
+      backgroundColor: panel,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  data['name'] ?? 'User',
+                  style: const TextStyle(
+                    color: gold,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 15),
+                ListTile(
+                  leading: const Icon(Icons.workspace_premium, color: gold),
+                  title: const Text('Activate Premium - 30 Days'),
+                  onTap: () async {
+                    Navigator.pop(sheetContext);
+                    await updatePremium(context, uid, 30);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.workspace_premium, color: gold),
+                  title: const Text('Activate Premium - 90 Days'),
+                  onTap: () async {
+                    Navigator.pop(sheetContext);
+                    await updatePremium(context, uid, 90);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.workspace_premium, color: gold),
+                  title: const Text('Activate Premium - 365 Days'),
+                  onTap: () async {
+                    Navigator.pop(sheetContext);
+                    await updatePremium(context, uid, 365);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.remove_circle_outline),
+                  title: const Text('Remove Premium'),
+                  onTap: () async {
+                    Navigator.pop(sheetContext);
+                    await removePremium(uid);
+                  },
+                ),
+                ListTile(
+                  leading: Icon(
+                    data['isBanned'] == true
+                        ? Icons.lock_open
+                        : Icons.block,
+                    color: Colors.redAccent,
+                  ),
+                  title: Text(
+                    data['isBanned'] == true ? 'Unban User' : 'Ban User',
+                  ),
+                  onTap: () async {
+                    Navigator.pop(sheetContext);
+                    await toggleBan(
+                      context,
+                      uid,
+                      data['isBanned'] == true,
+                    );
+                  },
+                ),
+              ],
+            ),
           ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(dialogContext);
-              _setPremium(context, userId, 7);
-            },
-            child: const Text('7 Days'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(dialogContext);
-              _setPremium(context, userId, 30);
-            },
-            child: const Text('1 Month'),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('USER MANAGEMENT')),
+      appBar: AppBar(
+        title: const Text('Admin Dashboard'),
+        actions: [
+          IconButton(
+            onPressed: () async {
+              await auth.signOut();
+            },
+            icon: const Icon(Icons.logout),
+          ),
+        ],
+      ),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: db.collection('users').snapshots(),
         builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return const _EmptyState(
-              icon: Icons.error_outline,
-              title: 'Could not load users',
-              subtitle: 'Check Firestore rules and internet connection.',
-            );
-          }
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(
               child: CircularProgressIndicator(color: gold),
             );
           }
 
-          final documents = snapshot.data?.docs ?? [];
-          if (documents.isEmpty) {
-            return const _EmptyState(
-              icon: Icons.people_outline,
-              title: 'No users yet',
-              subtitle: 'Registered app users will appear here.',
-            );
-          }
+          final users = snapshot.data?.docs ?? [];
 
-          return ListView.builder(
-            padding: const EdgeInsets.all(16),
-            itemCount: documents.length,
-            itemBuilder: (context, index) {
-              final document = documents[index];
-              final data = document.data();
-              final email = data['email']?.toString() ?? 'No email';
-              final name = data['name']?.toString() ?? 'User';
-              final isBanned = data['isBanned'] == true;
-              final premium = isPremiumActive(data);
-
-              return Card(
+          return ListView(
+            padding: const EdgeInsets.all(15),
+            children: [
+              Card(
                 color: panel,
-                margin: const EdgeInsets.only(bottom: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  side: BorderSide(color: gold.withOpacity(.18)),
-                ),
                 child: Padding(
-                  padding: const EdgeInsets.all(14),
+                  padding: const EdgeInsets.all(20),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Row(
-                        children: [
-                          const CircleAvatar(
-                            backgroundColor: Color(0xFF302719),
-                            child: Icon(Icons.person, color: gold),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  name,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                  ),
-                                ),
-                                const SizedBox(height: 3),
-                                Text(
-                                  email,
-                                  style: const TextStyle(
-                                    color: Colors.white54,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
+                      const Icon(
+                        Icons.people_alt_outlined,
+                        color: gold,
+                        size: 35,
                       ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'TOTAL USERS',
+                        style: TextStyle(color: Colors.white70),
+                      ),
                       Text(
-                        'UID: ${document.id}',
+                        '${users.length}',
                         style: const TextStyle(
-                          color: Colors.white38,
-                          fontSize: 10,
-                        ),
-                      ),
-                      const Divider(color: Colors.white12),
-                      SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        activeColor: gold,
-                        title: const Text('Ban User'),
-                        subtitle: Text(
-                          isBanned ? 'User is banned' : 'User is active',
-                        ),
-                        value: isBanned,
-                        onChanged: (value) => _changeUserStatus(
-                          context,
-                          document.id,
-                          'isBanned',
-                          value,
-                        ),
-                      ),
-                      const Divider(color: Colors.white12),
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: const Icon(
-                          Icons.workspace_premium,
                           color: gold,
-                        ),
-                        title: const Text('Premium Membership'),
-                        subtitle: Text(
-                          premium
-                              ? premiumRemaining(data)
-                              : 'Premium inactive or expired',
-                        ),
-                        trailing: PopupMenuButton<String>(
-                          icon: const Icon(Icons.more_vert, color: gold),
-                          onSelected: (value) {
-                            if (value == 'give') {
-                              _showPremiumOptions(context, document.id);
-                            } else {
-                              _removePremium(context, document.id);
-                            }
-                          },
-                          itemBuilder: (_) => const [
-                            PopupMenuItem(
-                              value: 'give',
-                              child: Text('Give / Renew Premium'),
-                            ),
-                            PopupMenuItem(
-                              value: 'remove',
-                              child: Text('Deactivate Premium'),
-                            ),
-                          ],
-                        ),
-                      ),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          onPressed: () =>
-                              _showPremiumOptions(context, document.id),
-                          icon: const Icon(Icons.add_circle_outline),
-                          label: const Text('GIVE PREMIUM'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: gold,
-                            side: const BorderSide(color: gold),
-                          ),
+                          fontWeight: FontWeight.w900,
+                          fontSize: 30,
                         ),
                       ),
                     ],
                   ),
                 ),
-              );
-            },
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'USER MANAGEMENT',
+                style: TextStyle(
+                  color: gold,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 17,
+                ),
+              ),
+              const SizedBox(height: 10),
+              ...users.map((doc) {
+                final data = doc.data();
+                final name = data['name'] ?? 'Unknown User';
+                final email = data['email'] ?? '';
+                final banned = data['isBanned'] == true;
+                final premium = isPremiumActive(data);
+
+                return Card(
+                  color: panel,
+                  child: ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: gold.withOpacity(.2),
+                      child: const Icon(Icons.person, color: gold),
+                    ),
+                    title: Text(name.toString()),
+                    subtitle: Text(
+                      '${email.toString()}\n'
+                      '${banned ? 'BANNED' : 'Active'}'
+                      '${premium ? ' • PREMIUM' : ''}',
+                    ),
+                    isThreeLine: true,
+                    trailing: IconButton(
+                      icon: const Icon(Icons.more_vert, color: gold),
+                      onPressed: () => showUserOptions(
+                        context,
+                        doc.id,
+                        data,
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ],
           );
         },
       ),
@@ -3177,23 +2561,29 @@ class _ActionTile extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) => Card(
-        color: panel,
-        margin: const EdgeInsets.only(bottom: 10),
-        child: ListTile(
-          onTap: onTap,
-          leading: Icon(icon, color: gold, size: 27),
-          title: Text(
-            title,
-            style: const TextStyle(fontWeight: FontWeight.bold),
-          ),
-          subtitle: Text(
-            subtitle,
-            style: const TextStyle(color: Colors.white54, fontSize: 12),
-          ),
-          trailing: const Icon(Icons.chevron_right, color: gold),
+  Widget build(BuildContext context) {
+    return Card(
+      color: panel,
+      margin: const EdgeInsets.only(bottom: 10),
+      child: ListTile(
+        onTap: onTap,
+        leading: Icon(icon, color: gold, size: 27),
+        title: Text(
+          title,
+          style: const TextStyle(fontWeight: FontWeight.bold),
         ),
-      );
+        subtitle: Text(
+          subtitle,
+          style: const TextStyle(color: Colors.white54),
+        ),
+        trailing: const Icon(
+          Icons.arrow_forward_ios,
+          color: gold,
+          size: 16,
+        ),
+      ),
+    );
+  }
 }
 
 class _StatCard extends StatelessWidget {
@@ -3208,87 +2598,101 @@ class _StatCard extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 8),
-        decoration: BoxDecoration(
-          color: panel,
-          borderRadius: BorderRadius.circular(15),
-          border: Border.all(color: gold.withOpacity(.18)),
-        ),
-        child: Column(
-          children: [
-            Icon(icon, color: gold),
-            const SizedBox(height: 8),
-            Text(
-              value,
-              style: const TextStyle(
-                fontWeight: FontWeight.w900,
-                fontSize: 20,
-              ),
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 8),
+      decoration: BoxDecoration(
+        color: panel,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: gold.withOpacity(.2)),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: gold),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            style: const TextStyle(
+              color: gold,
+              fontWeight: FontWeight.bold,
+              fontSize: 18,
             ),
-            Text(
-              label,
-              style: const TextStyle(color: Colors.white54, fontSize: 11),
+          ),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white54,
+              fontSize: 11,
             ),
-          ],
-        ),
-      );
+          ),
+        ],
+      ),
+    );
+  }
 }
 
-class _Feature extends StatelessWidget {
-  final String text;
-  const _Feature({required this.text});
+// APP ENTRY POINT
 
-  @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 9),
-        child: Row(
-          children: [
-            const Icon(Icons.check_circle, color: gold, size: 19),
-            const SizedBox(width: 10),
-            Expanded(child: Text(text)),
-          ],
-        ),
-      );
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await Firebase.initializeApp();
+
+  await Supabase.initialize(
+    url: supabaseUrl,
+    anonKey: supabaseKey,
+  );
+
+  runApp(const StrenzoApp());
 }
 
-class _EmptyState extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-
-  const _EmptyState({
-    super.key,
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-  });
+class StrenzoApp extends StatelessWidget {
+  const StrenzoApp({super.key});
 
   @override
-  Widget build(BuildContext context) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(28),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, color: gold, size: 64),
-              const SizedBox(height: 18),
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                subtitle,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white54),
-              ),
-            ],
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'STRENZO',
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: bg,
+        primaryColor: gold,
+        colorScheme: const ColorScheme.dark(
+          primary: gold,
+          secondary: gold,
+          surface: panel,
+        ),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: bg,
+          foregroundColor: Colors.white,
+          elevation: 0,
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: panel,
+          labelStyle: const TextStyle(color: Colors.white70),
+          hintStyle: const TextStyle(color: Colors.white38),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: Colors.white24),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: gold),
           ),
         ),
-      );
+        navigationBarTheme: const NavigationBarThemeData(
+          backgroundColor: Color(0xFF111111),
+          indicatorColor: Color(0x333B1550),
+          labelTextStyle: WidgetStatePropertyAll(
+            TextStyle(color: Colors.white70),
+          ),
+        ),
+      ),
+      home: const AuthGate(),
+    );
+  }
 }
+
+// END OF MAIN.DART PART 3 WILL CONTINUE WITH FRIENDS, PREMIUM, PROFILE AND ADMIN.
