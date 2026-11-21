@@ -235,6 +235,8 @@ jobs:
           name: STRENZO v1.0.0
           body: Official STRENZO Android App
           files: stranzo.apk
+          overwrite_files: true
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
